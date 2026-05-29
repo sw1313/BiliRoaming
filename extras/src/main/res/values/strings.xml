@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">漫游扩展</string>
+    <string name="xposed_description">哔哩漫游个人扩展：屏蔽好物、竖屏直播、会员中心、空降助手</string>
+    <string name="setting">设置</string>
+    <string name="setting_title">在客户端内打开设置</string>
+    <string name="setting_summary">从哔哩哔哩「我的」页面进入「漫游扩展」</string>
+    <string name="hide_icon_title">隐藏桌面图标</string>
+    <string name="hide_icon_summary">隐藏后可在 LSPosed 模块列表中管理</string>
+    <string name="about">关于</string>
+    <string name="version">版本</string>
+    <string name="running_status_enable">已激活</string>
+    <string name="running_status_disable">未激活</string>
+    <string name="runtime_xposed">运行环境：Xposed</string>
+    <string name="not_running_summary">请在 LSPosed 中启用本模块并勾选哔哩哔哩</string>
+    <string name="block_up_share_goods_title">屏蔽 UP 主分享好物</string>
+    <string name="block_up_share_goods_summary">屏蔽普通视频半屏详情页标签下方的「UP 主分享好物」模块</string>
+    <string name="block_story_live_title">屏蔽竖屏模式直播</string>
+    <string name="block_story_live_summary">屏蔽 Story 竖屏流中的直播卡片</string>
+    <string name="block_story_goods_title">屏蔽竖屏模式购物入口</string>
+    <string name="block_story_goods_summary">屏蔽竖屏模式中的「购物 / 视频同款 / 立即购买」商品入口</string>
+    <string name="story_background_auto_next_title">竖屏后台自动连播</string>
+    <string name="story_background_auto_next_summary">竖屏视频后台或息屏播放结束后，自动切到下一个视频</string>
+    <string name="foreground_auto_next_title">前台播放自动播放相关视频</string>
+    <string name="foreground_auto_next_summary">普通视频播完后自动播放推荐相关视频（非合集或合集最后一集）</string>
+    <string name="media_button_control_title">媒体按键控制上下视频</string>
+    <string name="media_button_control_summary">蓝牙耳机/线控的上一曲、下一曲按键切换视频（下一个全场景支持，上一个仅在可行场景支持，部分场景需配合对应连播开关）</string>
+    <string name="hide_vip_center_title">屏蔽我的界面会员中心</string>
+    <string name="hide_vip_center_summary">移除我的页面大会员横幅及会员中心入口</string>
+    <string name="disable_chapter_progress_title">默认关闭章节进度条</string>
+    <string name="disable_chapter_progress_summary">进入视频时自动关闭官方章节进度条，避免每个视频重复关闭和误触</string>
+    <string name="sponsorblock_enable_title">空降助手</string>
+    <string name="sponsorblock_enable_summary">自动跳过社区标注的恰饭片段</string>
+    <string name="sponsorblock_settings_title">空降助手设置</string>
+    <string name="sponsorblock_settings_summary">服务状态、分类、Toast、统计和服务器地址</string>
+    <string name="show_info_title">显示激活提示</string>
+    <string name="show_info_summary">哔哩哔哩启动时显示漫游扩展激活 Toast</string>
+    <string name="feature_group">功能</string>
+    <string name="misc_group">其他</string>
+</resources>

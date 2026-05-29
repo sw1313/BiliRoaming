@@ -1,0 +1,23 @@
+# Build / IDE / local artifacts
+/build
+/.cxx
+/.gradle
+/.idea
+/.kotlin
+/release
+/local.properties
+
+# Standalone leftovers (this module is built from the root multi-project)
+/settings.gradle.kts
+/gradle.properties
+/gradle
+
+# Decompiler / analysis scratch
+/jadx
+/jadx_out
+/jadx_out_fg
+/biliroamingextras
+/1
+
+*.apk
+*.zip
