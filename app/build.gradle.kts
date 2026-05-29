@@ -11,7 +11,11 @@ plugins {
     alias(libs.plugins.lsplugin.cmaker)
 }
 
-val appVerCode = jgit.repo()?.commitCount("refs/remotes/origin/master") ?: 0
+val appVerCode = jgit.repo()?.let { repo ->
+    val masterCommitCount = repo.commitCount("refs/remotes/origin/master") ?: 0
+    val headCommitCount = repo.commitCount("HEAD") ?: 0
+    masterCommitCount.takeIf { it > 0 } ?: headCommitCount.coerceAtLeast(1)
+} ?: 1
 val appVerName: String by rootProject
 
 apksign {
@@ -165,23 +169,21 @@ dependencies {
 
 val adbExecutable: String = androidComponents.sdkComponents.adb.get().asFile.absolutePath
 
-val restartBiliBili = task("restartBiliBili").apply {
-    doLast {
-        exec {
-            commandLine(adbExecutable, "shell", "am", "force-stop", "tv.danmaku.bili")
-        }
-        exec {
-            commandLine(
-                adbExecutable,
-                "shell",
-                "am",
-                "start",
-                "$(pm resolve-activity --components tv.danmaku.bili)"
-            )
-        }
-    }
+val forceStopBiliBili = tasks.register<Exec>("forceStopBiliBili") {
+    commandLine(adbExecutable, "shell", "am", "force-stop", "tv.danmaku.bili")
 }
 
-afterEvaluate {
-    tasks.getByPath("installDebug").finalizedBy(restartBiliBili)
+val restartBiliBili = tasks.register<Exec>("restartBiliBili") {
+    dependsOn(forceStopBiliBili)
+    commandLine(
+        adbExecutable,
+        "shell",
+        "am",
+        "start",
+        "$(pm resolve-activity --components tv.danmaku.bili)"
+    )
+}
+
+tasks.matching { it.name == "installDebug" }.configureEach {
+    finalizedBy(restartBiliBili)
 }
