@@ -23,6 +23,17 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
         const val NEXT_COOLDOWN_MS = 3_000L
         const val LOAD_MORE_COOLDOWN_MS = 1_500L
         const val TAIL_FORCE_LOAD_MORE_MS = 2_500L
+
+        // Foreground progress hand-off (seek back to background position on resume).
+        const val FOREGROUND_SEEK_MIN_MS = 3_000L
+        const val FOREGROUND_SEEK_POLL_MS = 200L
+        const val FOREGROUND_SEEK_TIMEOUT_MS = 6_000L
+        const val FOREGROUND_SEEK_RESET_MARGIN_MS = 2_000L
+        // After the first seek, keep watching for this long and re-seek if the reopen's own
+        // resume clobbers the position back toward the start (short videos lose this race).
+        const val FOREGROUND_SEEK_HOLD_MS = 2_500L
+        const val FOREGROUND_SEEK_CLOBBER_MARGIN_MS = 2_500L
+        const val FOREGROUND_SEEK_MAX_RETRIES = 6
         val hookedConcreteClasses = ConcurrentHashMap.newKeySet<String>()
         val mainHandler = Handler(Looper.getMainLooper())
 
@@ -322,6 +333,21 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
             w2ResumeMethod.hookMethod { chain ->
                 val player = chain.thisObject
                 val savedTracked = trackedIndex
+                // Capture the background playback position + identity of the video that is
+                // about to become foreground index 0, BEFORE resume/rebuild runs. The rebuild
+                // reopens the video from 0:00, so we hand the progress back via a seek once the
+                // foreground player has re-prepared (see scheduleForegroundSeek).
+                // Read the live IPlayerCoreService that StoryPlayer actually plays through
+                // (StoryPlayer field b). The reflection-scanned activePlayerCore can resolve
+                // to an unrelated object that reports position 0 here.
+                val savedPos = liveStoryPlayerCore()
+                    ?.invokeLongGetter("getCurrentPosition", "getRealCurrentPosition") ?: 0L
+                // The background player advances via the engine (trackedIndex), while
+                // ViewPager2.getCurrentItem() stays put, so F1() would return the stale
+                // left-behind video. Read the item at trackedIndex (V1) - that is exactly
+                // what the rebuild promotes to index 0 and what F1() returns afterwards.
+                val targetId = storyIdentityAt(savedTracked)
+                Log.x("StoryAutoNext: foreground capture savedPos=$savedPos id=$targetId tracked=$savedTracked")
                 isInBackground = false
                 chain.proceed()
                 if (savedTracked > 0) {
@@ -338,6 +364,12 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
                                 if (item != null) items.add(item)
                             }
                             if (items.isNotEmpty()) {
+                                // Seed StoryPagerPlayer's native start-position field (int "t",
+                                // f208480t) so the rebuild's reopen natively seeks to savedPos
+                                // when it reaches prepared state (onStateChanged(3) consumes it).
+                                // This is the app's own resume mechanism, so the rebuild stays
+                                // intact (keeps subsequent swipes stable) while progress is kept.
+                                player.setNativeStartPosition(savedPos)
                                 val w2SetMethod = player.javaClass.methods.firstOrNull {
                                     it.name == "W2" &&
                                         it.parameterTypes.size == 3 &&
@@ -346,6 +378,7 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
                                 w2SetMethod?.invoke(player, items, null, 0)
                                 trackedIndex = 0
                                 Log.x("StoryAutoNext: foreground w2 reset adapter with ${items.size} items from $savedTracked")
+                                scheduleForegroundSeek(savedPos, targetId)
                             }
                         }.onFailure { Log.e(it) }
                     }
@@ -353,6 +386,145 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
             }
             Log.x("StoryAutoNext: hooked ${playerClass.name}.w2 for foreground sync")
         }
+    }
+
+    /**
+     * Seed StoryPagerPlayer's native "seek-to on prepare" field (the int field "t",
+     * f208480t). The app sets this to the current position when going inactive (Q2 state 4)
+     * and, in its StoryPlayer.d.onStateChanged, seeks to it once the player reaches the
+     * prepared state (3), then clears it. Reusing it lets the rebuild's reopen resume at the
+     * background position natively, instead of starting at 0:00 and visibly jumping.
+     */
+    private fun Any.setNativeStartPosition(posMs: Long) {
+        if (posMs <= 0L) return
+        runCatching {
+            val field = javaClass.declaredFields.firstOrNull {
+                it.name == "t" && it.type == Int::class.javaPrimitiveType
+            } ?: return
+            field.isAccessible = true
+            field.setInt(this, posMs.toInt())
+            Log.x("StoryAutoNext: seeded native start position t=$posMs")
+        }.onFailure { Log.e(it) }
+    }
+
+    /** Identity (bvid/cid) of the story item currently shown by the pager player (F1). */
+    private fun currentStoryIdentity(): String? = runCatching {
+        val player = activeStoryPlayer ?: return null
+        val item = player.javaClass.methods.firstOrNull { it.name == "F1" && it.parameterCount == 0 }
+            ?.invoke(player) ?: return null
+        item.storyIdentity()
+    }.getOrNull()
+
+    /** Identity (bvid/cid) of the adapter item at the given index (V1). */
+    private fun storyIdentityAt(index: Int): String? = runCatching {
+        if (index < 0) return null
+        val player = activeStoryPlayer ?: return null
+        val v1 = player.javaClass.methods.firstOrNull {
+            it.name == "V1" && it.parameterTypes.contentEquals(arrayOf(Int::class.javaPrimitiveType))
+        } ?: return null
+        val item = v1.invoke(player, index) ?: return null
+        item.storyIdentity()
+    }.getOrNull()
+
+    /**
+     * The live IPlayerCoreService that StoryPlayer actually plays through (StoryPlayer field
+     * b, concrete type == playerCoreMethods.serviceClass / vd3.p0). This is the authoritative
+     * position/seek target for both background and foreground; the reflection-scanned
+     * activePlayerCore can resolve to an unrelated object that reports position 0.
+     */
+    private fun liveStoryPlayerCore(): Any? = runCatching {
+        val serviceClass = instance.playerCoreMethods?.serviceClass ?: return null
+        val pager = activeStoryPlayer ?: return null
+        val storyPlayer = pager.javaClass.declaredFields.firstOrNull {
+            it.type.name == "com.bilibili.video.story.player.StoryPlayer"
+        }?.apply { isAccessible = true }?.get(pager) ?: return null
+        storyPlayer.javaClass.declaredFields.asSequence()
+            .mapNotNull { f -> runCatching { f.isAccessible = true; f.get(storyPlayer) }.getOrNull() }
+            .firstOrNull { serviceClass.isInstance(it) }
+    }.getOrNull()
+
+    /**
+     * Progress hand-off: after the foreground rebuild reopens the current video from 0:00,
+     * poll until the player core has re-prepared (duration>0) and the reopen has reset the
+     * position back near the start, then seek to the captured background position.
+     *
+     * Phase 1 (wait + seek): wait until duration>0 and the position has dropped clearly below
+     * what we captured (the reopen reset it), then seek once.
+     * Phase 2 (hold + re-seek): the reopen's own resolve->resume can start the video from 0
+     * AFTER our first seek (a race short videos tend to lose). So for a short hold window we
+     * keep watching, and if the position gets clobbered back toward the start we re-seek.
+     *
+     * The identity guard skips seeking until the pager has settled on the target video; a
+     * genuine user swipe never matches and harmlessly times out (no seek).
+     */
+    private fun scheduleForegroundSeek(savedPosMs: Long, targetId: String?) {
+        if (savedPosMs < FOREGROUND_SEEK_MIN_MS) return
+        val methods = instance.playerCoreMethods ?: return
+        val deadline = System.currentTimeMillis() + FOREGROUND_SEEK_TIMEOUT_MS
+        mainHandler.postDelayed(object : Runnable {
+            private var seeked = false
+            private var seekedAtMs = 0L
+            private var retries = 0
+
+            override fun run() {
+                runCatching {
+                    val now = System.currentTimeMillis()
+                    if (now > deadline) {
+                        if (!seeked) Log.x("StoryAutoNext: foreground seek timeout savedPos=$savedPosMs id=$targetId")
+                        return
+                    }
+                    val nowId = currentStoryIdentity()
+                    val idReady = targetId == null || nowId == null || nowId == targetId
+                    val core = liveStoryPlayerCore()
+                    val duration = core?.invokeLongGetter("getDuration", "getRealDuration") ?: 0L
+                    val position = core?.invokeLongGetter("getCurrentPosition", "getRealCurrentPosition") ?: 0L
+                    if (!idReady || core == null || duration <= 0L) {
+                        mainHandler.postDelayed(this, FOREGROUND_SEEK_POLL_MS)
+                        return
+                    }
+                    val target = savedPosMs.coerceAtMost((duration - 500L).coerceAtLeast(0L)).toInt()
+
+                    if (!seeked) {
+                        // Phase 1: wait for the reopen to reset the position below our capture.
+                        if (position >= savedPosMs - FOREGROUND_SEEK_RESET_MARGIN_MS) {
+                            mainHandler.postDelayed(this, FOREGROUND_SEEK_POLL_MS)
+                            return
+                        }
+                        if (invokeForegroundSeek(methods.seekTo, core, target)) {
+                            seeked = true
+                            seekedAtMs = now
+                            Log.x("StoryAutoNext: foreground seek to $target ms (duration=$duration id=$targetId)")
+                        }
+                        mainHandler.postDelayed(this, FOREGROUND_SEEK_POLL_MS)
+                        return
+                    }
+
+                    // Phase 2: hold and re-seek if the reopen's resume clobbered us back to 0.
+                    if (now - seekedAtMs > FOREGROUND_SEEK_HOLD_MS) return
+                    if (position < target - FOREGROUND_SEEK_CLOBBER_MARGIN_MS &&
+                        retries < FOREGROUND_SEEK_MAX_RETRIES
+                    ) {
+                        retries++
+                        invokeForegroundSeek(methods.seekTo, core, target)
+                        Log.x("StoryAutoNext: foreground re-seek($retries) to $target ms (pos=$position)")
+                    }
+                    mainHandler.postDelayed(this, FOREGROUND_SEEK_POLL_MS)
+                }.onFailure { Log.e(it) }
+            }
+        }, FOREGROUND_SEEK_POLL_MS)
+    }
+
+    private fun invokeForegroundSeek(seekTo: Method, core: Any, targetMs: Int): Boolean = runCatching {
+        seekTo.isAccessible = true
+        when (seekTo.parameterCount) {
+            1 -> seekTo.invoke(core, targetMs)
+            2 -> seekTo.invoke(core, targetMs, false)
+            else -> seekTo.invoke(core, targetMs)
+        }
+        true
+    }.getOrElse {
+        Log.e(it)
+        false
     }
 
     private fun hookRuntimeTargets(root: Any?) {
