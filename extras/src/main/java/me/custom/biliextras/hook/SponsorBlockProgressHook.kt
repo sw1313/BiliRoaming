@@ -3,6 +3,7 @@ package me.custom.biliextras.hook
 import android.graphics.Canvas
 import android.graphics.Paint
 import android.widget.ProgressBar
+import me.custom.biliextras.sponsorblock.SponsorBlockPrefs
 import me.custom.biliextras.sponsorblock.SponsorBlockState
 import me.custom.biliextras.utils.Log
 import me.custom.biliextras.utils.hookMethod
@@ -14,6 +15,8 @@ class SponsorBlockProgressHook(classLoader: ClassLoader) : BaseHook(classLoader)
     private val loggedClasses = Collections.newSetFromMap(WeakHashMap<Class<*>, Boolean>())
 
     override fun startHook() {
+        // 空降未开启时进度条永远不会显示分段，没必要给全 App 的 ProgressBar.onDraw 都挂钩。
+        if (!SponsorBlockPrefs.enabled) return
         ProgressBar::class.java.hookMethod("onDraw", Canvas::class.java) { chain ->
             val result = chain.proceed()
             if (SponsorBlockState.showProgress && SponsorBlockState.hasSegments) {

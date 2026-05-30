@@ -42,19 +42,22 @@ class XposedInit : XposedModule() {
                 Log.d("Bilibili version: ${getPackageVersion(packageName)}")
                 Log.d("Config: ${ePrefs.all}")
                 Log.toast("漫游扩展已激活")
-                BiliPackageLite(classLoader, context)
-                startHook { ExtrasSettingHook(classLoader) }
-                startHook { BlockUpShareGoodsHook(classLoader) }
-                startHook { BlockStoryLiveHook(classLoader) }
-                startHook { BlockStoryGoodsHook(classLoader) }
-                startHook { BlockChargingVideoHook(classLoader) }
-                startHook { StoryBackgroundAutoNextHook(classLoader) }
-                startHook { ForegroundAutoNextHook(classLoader) }
-                startHook { MediaButtonControlHook(classLoader) }
-                startHook { HideVipCenterHook(classLoader) }
-                startHook { DisableChapterProgressHook(classLoader) }
-                startHook { SponsorBlockHook(classLoader) }
-                startHook { SponsorBlockProgressHook(classLoader) }
+                val pkg = BiliPackageLite(classLoader, context)
+                // 启动期所有 dex 查找共用一个 DexHelper，dex 只解析一次。
+                pkg.runWithSharedDex {
+                    startHook { ExtrasSettingHook(classLoader) }
+                    startHook { BlockUpShareGoodsHook(classLoader) }
+                    startHook { BlockStoryLiveHook(classLoader) }
+                    startHook { BlockStoryGoodsHook(classLoader) }
+                    startHook { BlockChargingVideoHook(classLoader) }
+                    startHook { StoryBackgroundAutoNextHook(classLoader) }
+                    startHook { ForegroundAutoNextHook(classLoader) }
+                    startHook { MediaButtonControlHook(classLoader) }
+                    startHook { HideVipCenterHook(classLoader) }
+                    startHook { DisableChapterProgressHook(classLoader) }
+                    startHook { SponsorBlockHook(classLoader) }
+                    startHook { SponsorBlockProgressHook(classLoader) }
+                }
             }
             chain.proceed()
         }

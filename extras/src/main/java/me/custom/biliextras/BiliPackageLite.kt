@@ -80,14 +80,7 @@ class BiliPackageLite(
         val currentPosition: Method?,
     )
 
-    data class StoryAutoNextMethods(
-        val completionMethods: List<Method>,
-        val nextMethods: List<Method>,
-    )
-
     val playerCoreMethods by lazy { findPlayerCoreMethods() }
-    val chapterProgressSwitchMethods by lazy { findChapterProgressSwitchMethods() }
-    val storyAutoNextMethods by lazy { findStoryAutoNextMethods() }
     val pegasusConvertClass by lazy { findPegasusConvertClass() }
 
     private fun findPegasusConvertClass(): Class<*>? {
@@ -298,130 +291,47 @@ class BiliPackageLite(
         }.getOrNull()
     }
 
-    private fun findChapterProgressSwitchMethods(): List<Method> {
-        return withDexHelper { dexHelper ->
-            val markers = listOf(
-                "main.ugc-video-detail.resident-chapter.control-switch.click",
-                "player.player.option-chapter.0.player",
-                "main.ugc-video-detail.chapter.0.click",
-            )
-            markers.flatMap { marker ->
-                dexHelper.findMethodUsingString(
-                    marker,
-                    true,
-                    -1,
-                    -1,
-                    null,
-                    -1,
-                    null,
-                    null,
-                    null,
-                    false,
-                ).asSequence().mapNotNull {
-                    dexHelper.decodeMethodIndex(it) as? Method
-                }.toList()
-            }.distinctBy { "${it.declaringClass.name}#${it.name}${it.parameterTypes.joinToString(prefix = "(", postfix = ")") { type -> type.name }}" }
-                .onEach { it.isAccessible = true }
-        }.onSuccess {
-            Log.x(
-                "Chapter progress dex result: ${
-                    it.joinToString { method ->
-                        "${method.declaringClass.name}#${method.name}/${method.parameterCount}:${method.returnType.name}"
-                    }
-                }",
-            )
-        }.onFailure {
-            Log.e(it)
-        }.getOrDefault(emptyList())
-    }
-
-    private fun findStoryAutoNextMethods(): StoryAutoNextMethods {
-        val storyClass = storyPagerPlayerClass ?: return StoryAutoNextMethods(emptyList(), emptyList())
-        return withDexHelper { dexHelper ->
-            val storyClassIndex = dexHelper.encodeClassIndex(storyClass)
-            val markers = listOf(
-                "next",
-                "Next",
-                "auto",
-                "Auto",
-                "complete",
-                "Complete",
-                "finish",
-                "Finish",
-                "scroll",
-                "Scroll",
-                "slide",
-                "Slide",
-            )
-            val markerMethods = markers.flatMap { marker ->
-                dexHelper.findMethodUsingString(
-                    marker,
-                    false,
-                    -1,
-                    -1,
-                    null,
-                    storyClassIndex,
-                    null,
-                    null,
-                    null,
-                    false,
-                ).asSequence().mapNotNull { dexHelper.decodeMethodIndex(it) as? Method }.toList()
-            }
-            val declared = storyClass.declaredMethods.asSequence().filter { method ->
-                method.parameterCount <= 2 &&
-                    (method.returnType == Void.TYPE || method.returnType == Boolean::class.javaPrimitiveType)
-            }
-            val candidates = (markerMethods.asSequence() + declared)
-                .distinctBy { method ->
-                    "${method.declaringClass.name}#${method.name}${method.parameterTypes.joinToString(prefix = "(", postfix = ")") { it.name }}"
-                }
-                .onEach { it.isAccessible = true }
-                .toList()
-            val nextMethods = candidates.filter(::isStoryNextCandidate).take(12)
-            val completionMethods = candidates.filter(::isStoryCompletionCandidate).take(12)
-            StoryAutoNextMethods(completionMethods, nextMethods)
-        }.onSuccess { methods ->
-            Log.x(
-                "StoryAutoNext dex result: completion=${methods.completionMethods.joinToString { it.shortSignature() }}, " +
-                    "next=${methods.nextMethods.joinToString { it.shortSignature() }}",
-            )
-        }.onFailure {
-            Log.e(it)
-        }.getOrDefault(StoryAutoNextMethods(emptyList(), emptyList()))
-    }
-
-    private fun isStoryNextCandidate(method: Method): Boolean {
-        val name = method.name.lowercase()
-        return method.parameterCount <= 1 &&
-            (method.returnType == Void.TYPE || method.returnType == Boolean::class.javaPrimitiveType) &&
-            (name.contains("next") ||
-                name.contains("scroll") ||
-                name.contains("slide") ||
-                name.contains("turn") ||
-                name.contains("page"))
-    }
-
-    private fun isStoryCompletionCandidate(method: Method): Boolean {
-        val name = method.name.lowercase()
-        return method.parameterCount <= 2 &&
-            (name.contains("complete") ||
-                name.contains("completion") ||
-                name.contains("finish") ||
-                name.contains("ended") ||
-                name.contains("playend"))
-    }
-
-    private fun Method.shortSignature(): String =
-        "${declaringClass.name}#$name/${parameterCount}:${returnType.simpleName}"
-
     private fun <T> withDexHelper(block: (DexHelper) -> T): Result<T> {
         return runCatching {
+            // 启动批量挂钩期间复用同一个 DexHelper，避免每个 lazy 查找各自重新解析整个 dex。
+            sharedDexHelper?.let { return@runCatching block(it) }
             loadDexHelperLibrary()
             val realClassLoader = classLoader.findDexClassLoader(::findRealClassloader)
                 ?: error("No BaseDexClassLoader found")
             DexHelper(realClassLoader).use { dexHelper ->
                 block(dexHelper)
             }
+        }
+    }
+
+    /**
+     * 在一次会话内只构造一个 DexHelper 并共享给所有 lazy 查找（启动时一次性挂钩用）。
+     * 仅是复用同一份已解析的 dex，查找逻辑与结果完全不变；构造失败时回退为各自新建。
+     */
+    fun runWithSharedDex(block: () -> Unit) {
+        if (sharedDexHelper != null) {
+            block()
+            return
+        }
+        val helper = runCatching {
+            loadDexHelperLibrary()
+            val realClassLoader = classLoader.findDexClassLoader(::findRealClassloader)
+                ?: error("No BaseDexClassLoader found")
+            DexHelper(realClassLoader)
+        }.getOrElse {
+            Log.e(it)
+            null
+        }
+        if (helper == null) {
+            block()
+            return
+        }
+        try {
+            sharedDexHelper = helper
+            block()
+        } finally {
+            sharedDexHelper = null
+            runCatching { helper.close() }
         }
     }
 
@@ -432,6 +342,8 @@ class BiliPackageLite(
         lateinit var instance: BiliPackageLite
         @Volatile
         private var dexHelperLibraryLoaded = false
+        @Volatile
+        private var sharedDexHelper: DexHelper? = null
 
         private fun loadDexHelperLibrary() {
             if (dexHelperLibraryLoaded) return
