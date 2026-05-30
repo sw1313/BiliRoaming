@@ -124,24 +124,44 @@ class SponsorBlockHook(classLoader: ClassLoader) : BaseHook(classLoader) {
             // it is unavailable.
             val player = chain.thisObject
             val list = chain.args[0] as? List<*>
-            val firstItem = player.callMethodOrNull("F1") ?: list?.firstOrNull()
-            if (firstItem != null) {
-                val bvid = firstValidBvid(
-                    firstItem.callMethodOrNullAs<String?>("getBvid"),
-                    firstItem.callMethodOrNullAs<String?>("getBvId"),
-                ) ?: firstItem.callMethodOrNullAs<Long?>("getAid")?.takeIf { it > 0 }?.let(::av2bv)
-                val cid = firstItem.callMethodOrNullAs<Long?>("getCid") ?: 0L
-                if (!bvid.isNullOrBlank() && bvid.startsWith("BV")) {
-                    if (cid > 0L) {
-                        updateVideo(VideoKey(bvid, cid))
-                    } else {
-                        clearStaleProgressState(bvid, cid)
-                    }
-                }
-            }
+            updateFromStoryItem(player.callMethodOrNull("F1") ?: list?.firstOrNull())
             chain.proceed()
         }
+        // Swiping between already-loaded videos (especially in UP space, where the list is
+        // prefetched) triggers neither addVideo nor a fresh playView request, so the current
+        // video and its segments would go stale: a no-ad video keeps a previous video's bar,
+        // and an ad video shows mismatched segments that never skip. x2() is the player's
+        // "play the current page" entry, invoked on every page change in both story feeds, so
+        // read the now-current item there to keep segments bound to the on-screen video.
+        val x2Method = playerClass.declaredMethods.firstOrNull {
+            it.name == "x2" && it.parameterTypes.size == 1 &&
+                it.parameterTypes[0] == Boolean::class.javaPrimitiveType
+        }
+        if (x2Method != null) {
+            x2Method.hookMethod { chain ->
+                val result = chain.proceed()
+                updateFromStoryItem(chain.thisObject.callMethodOrNull("F1"))
+                result
+            }
+            Log.x("SponsorBlock: hooked StoryPagerPlayer.x2 for page-change detection")
+        }
         Log.x("SponsorBlock: hooked StoryPagerPlayer.$addVideoName for video change detection")
+    }
+
+    /** Resolve a story item's bvid/cid and (re)bind SponsorBlock to it. */
+    private fun updateFromStoryItem(item: Any?) {
+        item ?: return
+        val bvid = firstValidBvid(
+            item.callMethodOrNullAs<String?>("getBvid"),
+            item.callMethodOrNullAs<String?>("getBvId"),
+        ) ?: item.callMethodOrNullAs<Long?>("getAid")?.takeIf { it > 0 }?.let(::av2bv)
+        if (bvid.isNullOrBlank() || !bvid.startsWith("BV")) return
+        val cid = item.callMethodOrNullAs<Long?>("getCid") ?: 0L
+        if (cid > 0L) {
+            updateVideo(VideoKey(bvid, cid))
+        } else {
+            clearStaleProgressState(bvid, cid)
+        }
     }
 
     private fun hookPlayerCore() {
