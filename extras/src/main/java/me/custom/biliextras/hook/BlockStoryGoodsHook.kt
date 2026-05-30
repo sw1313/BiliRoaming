@@ -13,12 +13,18 @@ class BlockStoryGoodsHook(classLoader: ClassLoader) : BaseHook(classLoader) {
             return
         }
 
+        // c() decides whether the cart should be shown; force it false where it survives R8
+        // (it is often inlined, so this alone is unreliable - see setVisibility below).
         widgetClass.hookMethod("c") {
             false
         }
+        // StoryShopCartWidget.setVisibility(i): `if (i != 0 || c()) super.setVisibility(i)`.
+        // The cart entry view is added into this widget (aVar.a(this, ...)), so forcing the
+        // container to GONE hides it. Pass the override through proceed(args) - chain.args is
+        // an immutable list, so the previous `chain.args[0] = GONE` threw and silently let the
+        // original (visible) value through, leaving the cart on screen.
         widgetClass.hookMethod("setVisibility", Int::class.javaPrimitiveType) { chain ->
-            chain.args[0] = View.GONE
-            chain.proceed()
+            chain.proceed(arrayOf<Any?>(View.GONE))
         }
         Log.d("startHook: BlockStoryGoods")
     }
