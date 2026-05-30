@@ -48,6 +48,7 @@ class XposedInit : XposedModule() {
                     startHook { ExtrasSettingHook(classLoader) }
                     startHook { BlockUpShareGoodsHook(classLoader) }
                     startHook { BlockStoryLiveHook(classLoader) }
+                    startHook { BlockStoryAdHook(classLoader) }
                     startHook { BlockStoryGoodsHook(classLoader) }
                     startHook { BlockChargingVideoHook(classLoader) }
                     startHook { StoryBackgroundAutoNextHook(classLoader) }

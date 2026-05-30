@@ -54,9 +54,14 @@
 
         <SwitchPreference
             android:defaultValue="false"
-            android:key="block_story_goods"
-            android:summary="@string/block_story_goods_summary"
-            android:title="@string/block_story_goods_title" />
+            android:key="block_story_ad"
+            android:summary="@string/block_story_ad_summary"
+            android:title="@string/block_story_ad_title" />
+
+        <Preference
+            android:key="story_diversion_settings"
+            android:summary="@string/story_diversion_settings_summary"
+            android:title="@string/story_diversion_settings_title" />
 
         <SwitchPreference
             android:defaultValue="false"

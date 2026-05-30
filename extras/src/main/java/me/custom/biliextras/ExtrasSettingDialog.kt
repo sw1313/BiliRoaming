@@ -18,6 +18,7 @@ import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ListView
 import android.widget.TextView
+import me.custom.biliextras.hook.StoryDiversionPrefs
 import me.custom.biliextras.sponsorblock.SponsorBlockApi
 import me.custom.biliextras.sponsorblock.SponsorBlockCategory
 import me.custom.biliextras.sponsorblock.SponsorBlockPrefs
@@ -42,7 +43,7 @@ class ExtrasSettingDialog(context: Context) : AlertDialog.Builder(context) {
             listOf(
                 "block_up_share_goods",
                 "block_story_live",
-                "block_story_goods",
+                "block_story_ad",
                 "story_background_auto_next",
                 "foreground_auto_next",
                 "media_button_control",
@@ -57,7 +58,9 @@ class ExtrasSettingDialog(context: Context) : AlertDialog.Builder(context) {
                 findPreference(it)?.onPreferenceChangeListener = this
             }
             findPreference("sponsorblock_settings")?.onPreferenceClickListener = this
+            findPreference("story_diversion_settings")?.onPreferenceClickListener = this
             updateSponsorBlockSummary()
+            updateStoryDiversionSummary()
         }
 
         override fun onPreferenceChange(preference: Preference?, newValue: Any?): Boolean {
@@ -75,6 +78,10 @@ class ExtrasSettingDialog(context: Context) : AlertDialog.Builder(context) {
                     showSponsorBlockSettings()
                     true
                 }
+                "story_diversion_settings" -> {
+                    showStoryDiversionSettings()
+                    true
+                }
                 else -> false
             }
         }
@@ -85,6 +92,35 @@ class ExtrasSettingDialog(context: Context) : AlertDialog.Builder(context) {
             }.ifBlank { "未启用自动跳过" }
             findPreference("sponsorblock_settings")?.summary =
                 "服务状态：${SponsorBlockPrefs.status}；自动跳过：$categories"
+        }
+
+        private fun updateStoryDiversionSummary() {
+            val blocked = StoryDiversionPrefs.blockedShortTitles()
+                .joinToString("、")
+                .ifBlank { "未屏蔽任何入口" }
+            findPreference("story_diversion_settings")?.summary = "已屏蔽：$blocked"
+        }
+
+        private fun showStoryDiversionSettings() {
+            val context = activity ?: return
+            val entries = StoryDiversionPrefs.allEntries
+            val titles = entries.map { it.title }.toTypedArray()
+            val checked = entries.map { StoryDiversionPrefs.isBlocked(it.key) }.toBooleanArray()
+            AlertDialog.Builder(context)
+                .setTitle("屏蔽竖屏导流入口选项")
+                .setMultiChoiceItems(titles, checked) { _, which, isChecked ->
+                    checked[which] = isChecked
+                }
+                .setNegativeButton(android.R.string.cancel, null)
+                .setPositiveButton(android.R.string.ok) { _, _ ->
+                    val editor = ePrefs.edit()
+                    entries.forEachIndexed { index, entry ->
+                        editor.putBoolean(entry.key, checked[index])
+                    }
+                    editor.commit()
+                    updateStoryDiversionSummary()
+                }
+                .show()
         }
 
         private fun showSponsorBlockSettings() {
