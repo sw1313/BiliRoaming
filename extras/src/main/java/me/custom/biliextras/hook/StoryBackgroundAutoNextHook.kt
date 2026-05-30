@@ -332,7 +332,15 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
         if (w2ResumeMethod != null) {
             w2ResumeMethod.hookMethod { chain ->
                 val player = chain.thisObject
-                val savedTracked = trackedIndex
+                // trackedIndex only follows BACKGROUND auto-next advances; it is NOT bumped
+                // by foreground user swipes (those move ViewPager2.getCurrentItem / D1 via the
+                // app's own page callback) and is reset to 0 after each resume rebuild. So if
+                // the user swiped forward in the foreground and then backgrounded again, a raw
+                // trackedIndex is stale-low and the rebuild below would jump back 1-2 videos.
+                // Reconcile against D1 exactly like triggerNextStory()/triggerPreviousBackground()
+                // do: the real playing index is never below the pager's current item.
+                val pagerIndex = player.invokeIntGetter("D1", "getIndex") ?: -1
+                val savedTracked = if (trackedIndex >= pagerIndex) trackedIndex else pagerIndex
                 // Capture the background playback position + identity of the video that is
                 // about to become foreground index 0, BEFORE resume/rebuild runs. The rebuild
                 // reopens the video from 0:00, so we hand the progress back via a seek once the
