@@ -27,6 +27,12 @@
     <string name="media_button_control_summary">蓝牙耳机/线控的上一曲、下一曲按键切换视频（下一个全场景支持，上一个仅在可行场景支持，部分场景需配合对应连播开关）</string>
     <string name="hide_vip_center_title">屏蔽我的界面会员中心</string>
     <string name="hide_vip_center_summary">移除我的页面大会员横幅及会员中心入口</string>
+    <string name="block_charging_video_title">屏蔽充电视频</string>
+    <string name="block_charging_video_summary">屏蔽首页推荐、竖屏视频流、相关视频及自动连播中的充电专属视频</string>
+    <string name="block_charging_video_log_title">充电视频屏蔽调试日志</string>
+    <string name="block_charging_video_log_summary">在 logcat 打印各处卡片字段，用于定位未确认的充电标记（仅排查时开启）</string>
+    <string name="block_promoted_video_title">屏蔽运营推广视频</string>
+    <string name="block_promoted_video_summary">屏蔽相关视频/连播里购买的运营推广位（与正在播放内容无关、多个视频下重复出现的“热搜”推送）</string>
     <string name="disable_chapter_progress_title">默认关闭章节进度条</string>
     <string name="disable_chapter_progress_summary">进入视频时自动关闭官方章节进度条，避免每个视频重复关闭和误触</string>
     <string name="sponsorblock_enable_title">空降助手</string>
@@ -36,5 +42,8 @@
     <string name="show_info_title">显示激活提示</string>
     <string name="show_info_summary">哔哩哔哩启动时显示漫游扩展激活 Toast</string>
     <string name="feature_group">功能</string>
+    <string name="playback_group">播放与连播</string>
+    <string name="block_group">屏蔽推荐与广告</string>
+    <string name="sponsorblock_group">空降助手</string>
     <string name="misc_group">其他</string>
 </resources>

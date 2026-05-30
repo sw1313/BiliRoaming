@@ -47,6 +47,7 @@ class XposedInit : XposedModule() {
                 startHook { BlockUpShareGoodsHook(classLoader) }
                 startHook { BlockStoryLiveHook(classLoader) }
                 startHook { BlockStoryGoodsHook(classLoader) }
+                startHook { BlockChargingVideoHook(classLoader) }
                 startHook { StoryBackgroundAutoNextHook(classLoader) }
                 startHook { ForegroundAutoNextHook(classLoader) }
                 startHook { MediaButtonControlHook(classLoader) }

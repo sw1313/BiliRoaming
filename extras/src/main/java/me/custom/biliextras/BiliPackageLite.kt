@@ -11,6 +11,7 @@ class BiliPackageLite(
     context: Context,
 ) {
     val fastJsonClass by lazy { "com.alibaba.fastjson.JSON".from(classLoader) }
+    val fastjsonFieldAnnotation by lazy { "com.alibaba.fastjson.annotation.JSONField".from(classLoader) }
     val generalResponseClass by lazy {
         "com.bilibili.okretro.GeneralResponse".from(classLoader)
             ?: "com.bilibili.okretro.call.GeneralResponse".from(classLoader)
@@ -87,6 +88,30 @@ class BiliPackageLite(
     val playerCoreMethods by lazy { findPlayerCoreMethods() }
     val chapterProgressSwitchMethods by lazy { findChapterProgressSwitchMethods() }
     val storyAutoNextMethods by lazy { findStoryAutoNextMethods() }
+    val pegasusConvertClass by lazy { findPegasusConvertClass() }
+
+    private fun findPegasusConvertClass(): Class<*>? {
+        return withDexHelper { dexHelper ->
+            dexHelper.findMethodUsingString(
+                "card_type is empty",
+                false,
+                -1,
+                -1,
+                null,
+                -1,
+                null,
+                null,
+                null,
+                true,
+            ).asSequence().firstNotNullOfOrNull {
+                dexHelper.decodeMethodIndex(it)
+            }?.declaringClass
+        }.onSuccess {
+            Log.d("Pegasus convert class dex result: ${it?.name}")
+        }.onFailure {
+            Log.e(it)
+        }.getOrNull()
+    }
 
     fun homeCenters(): List<Pair<Class<*>?, List<Method>>> {
         return withDexHelper { dexHelper ->

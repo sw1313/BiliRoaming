@@ -1,12 +1,44 @@
 <?xml version="1.0" encoding="utf-8"?>
 <PreferenceScreen xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <PreferenceCategory android:title="@string/feature_group">
+    <PreferenceCategory android:title="@string/playback_group">
         <SwitchPreference
             android:defaultValue="false"
-            android:key="block_up_share_goods"
-            android:summary="@string/block_up_share_goods_summary"
-            android:title="@string/block_up_share_goods_title" />
+            android:key="foreground_auto_next"
+            android:summary="@string/foreground_auto_next_summary"
+            android:title="@string/foreground_auto_next_title" />
+
+        <SwitchPreference
+            android:defaultValue="false"
+            android:key="story_background_auto_next"
+            android:summary="@string/story_background_auto_next_summary"
+            android:title="@string/story_background_auto_next_title" />
+
+        <SwitchPreference
+            android:defaultValue="false"
+            android:key="media_button_control"
+            android:summary="@string/media_button_control_summary"
+            android:title="@string/media_button_control_title" />
+
+        <SwitchPreference
+            android:defaultValue="true"
+            android:key="disable_chapter_progress"
+            android:summary="@string/disable_chapter_progress_summary"
+            android:title="@string/disable_chapter_progress_title" />
+    </PreferenceCategory>
+
+    <PreferenceCategory android:title="@string/block_group">
+        <SwitchPreference
+            android:defaultValue="false"
+            android:key="block_charging_video"
+            android:summary="@string/block_charging_video_summary"
+            android:title="@string/block_charging_video_title" />
+
+        <SwitchPreference
+            android:defaultValue="false"
+            android:key="block_promoted_video"
+            android:summary="@string/block_promoted_video_summary"
+            android:title="@string/block_promoted_video_title" />
 
         <SwitchPreference
             android:defaultValue="false"
@@ -22,21 +54,9 @@
 
         <SwitchPreference
             android:defaultValue="false"
-            android:key="story_background_auto_next"
-            android:summary="@string/story_background_auto_next_summary"
-            android:title="@string/story_background_auto_next_title" />
-
-        <SwitchPreference
-            android:defaultValue="false"
-            android:key="foreground_auto_next"
-            android:summary="@string/foreground_auto_next_summary"
-            android:title="@string/foreground_auto_next_title" />
-
-        <SwitchPreference
-            android:defaultValue="false"
-            android:key="media_button_control"
-            android:summary="@string/media_button_control_summary"
-            android:title="@string/media_button_control_title" />
+            android:key="block_up_share_goods"
+            android:summary="@string/block_up_share_goods_summary"
+            android:title="@string/block_up_share_goods_title" />
 
         <SwitchPreference
             android:defaultValue="false"
@@ -45,11 +65,13 @@
             android:title="@string/hide_vip_center_title" />
 
         <SwitchPreference
-            android:defaultValue="true"
-            android:key="disable_chapter_progress"
-            android:summary="@string/disable_chapter_progress_summary"
-            android:title="@string/disable_chapter_progress_title" />
+            android:defaultValue="false"
+            android:key="block_charging_video_log"
+            android:summary="@string/block_charging_video_log_summary"
+            android:title="@string/block_charging_video_log_title" />
+    </PreferenceCategory>
 
+    <PreferenceCategory android:title="@string/sponsorblock_group">
         <SwitchPreference
             android:defaultValue="false"
             android:key="sponsorblock_enable"
