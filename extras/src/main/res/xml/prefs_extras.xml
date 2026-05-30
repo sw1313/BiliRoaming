@@ -36,6 +36,12 @@
 
         <SwitchPreference
             android:defaultValue="false"
+            android:key="block_charging_video_net"
+            android:summary="@string/block_charging_video_net_summary"
+            android:title="@string/block_charging_video_net_title" />
+
+        <SwitchPreference
+            android:defaultValue="false"
             android:key="block_promoted_video"
             android:summary="@string/block_promoted_video_summary"
             android:title="@string/block_promoted_video_title" />

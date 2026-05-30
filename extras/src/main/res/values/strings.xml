@@ -28,7 +28,9 @@
     <string name="hide_vip_center_title">屏蔽我的界面会员中心</string>
     <string name="hide_vip_center_summary">移除我的页面大会员横幅及会员中心入口</string>
     <string name="block_charging_video_title">屏蔽充电视频</string>
-    <string name="block_charging_video_summary">屏蔽首页推荐、竖屏视频流、相关视频及自动连播中的充电专属视频</string>
+    <string name="block_charging_video_summary">屏蔽首页推荐、竖屏视频流、相关视频及自动连播中的充电专属视频。竖屏流靠自带标记识别；其余列表的卡片不带充电标记，会自动记住你打开/播放过的充电视频（持久保存）后续屏蔽，如需首次出现即屏蔽请同时开启下方“联网精准识别”</string>
+    <string name="block_charging_video_net_title">充电视频联网精准识别</string>
+    <string name="block_charging_video_net_summary">需配合“屏蔽充电视频”一起开启。首页推荐、相关视频、自动连播里的卡片本身不带充电标记，开启后会对其中的视频逐个调用 B 站接口查询 is_upower_exclusive 来精准识别并屏蔽（首次加载会产生少量额外网络请求，结果会缓存，每个视频只查一次，后续秒过；关闭则仅按已看过/已播放过的记录屏蔽）</string>
     <string name="block_charging_video_log_title">充电视频屏蔽调试日志</string>
     <string name="block_charging_video_log_summary">在 logcat 打印各处卡片字段，用于定位未确认的充电标记（仅排查时开启）</string>
     <string name="block_promoted_video_title">屏蔽运营推广视频</string>
