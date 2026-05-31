@@ -8,12 +8,18 @@ class BlockStoryGoodsHook(classLoader: ClassLoader) : BaseHook(classLoader) {
         val blockedGotos = StoryDiversionPrefs.blockedGotos()
         val shopCart = StoryDiversionPrefs.shopCartBlocked()
         val adOverlay = StoryDiversionPrefs.adOverlayBlocked()
-        if (blockedGotos.isEmpty() && !shopCart && !adOverlay) return
+        val ogvCategories = StoryDiversionPrefs.blockedOgvCategories()
+        val textLabels = StoryDiversionPrefs.blockedTextLabels()
+        if (blockedGotos.isEmpty() && !shopCart && !adOverlay && textLabels.isEmpty()) return
 
+        val ogvKeywords = ogvCategories.flatten().toSet()
         if (shopCart) blockShopCartWidget()
         if (adOverlay) blockStoryAdWidget()
-        if (blockedGotos.isNotEmpty()) blockStoryDiversionEntry(blockedGotos)
-        Log.x("startHook: BlockStoryGoods (shopCart=$shopCart, adOverlay=$adOverlay, diversion=$blockedGotos)")
+        if (ogvKeywords.isNotEmpty()) blockOgvCollection(ogvKeywords)
+        if (blockedGotos.isNotEmpty() || textLabels.isNotEmpty()) {
+            blockStoryDiversionEntry(blockedGotos, textLabels)
+        }
+        Log.s("startHook: BlockStoryGoods (shopCart=$shopCart, adOverlay=$adOverlay, ogvCats=$ogvCategories, textLabels=$textLabels, diversion=$blockedGotos)")
     }
 
     /**
@@ -68,12 +74,21 @@ class BlockStoryGoodsHook(classLoader: ClassLoader) : BaseHook(classLoader) {
      * "ad"/"anchor_ad" (广告). For "cart" z0() hides this chip and spawns the floating
      * "购物 / 视频同款 / 立即购买" card through the ad route service (d.e(...)).
      *
-     * The "话题 / 音乐" tags are a SEPARATE widget and are never touched here. We only suppress
-     * entries whose entryGoto is in [blockedGotos] (chosen per-type in the settings sub-menu): for
-     * those we force the chip GONE and skip O() so z0() never runs and the floating card is never
-     * spawned. Every other goto proceeds normally.
+     * The "话题 / 音乐" tags are a SEPARATE widget and are never touched here.
+     *
+     * Two block sources feed this single chip:
+     *  - [blockedGotos]: per-type chip toggles (cart/game/vip/ad). For those we force the chip GONE
+     *    and skip O() so z0() never runs and the floating card is never spawned.
+     *  - [textLabels]: the 番剧/电影「影视溯源胶片卡」and the 充电 entry. Those cards are ALSO diversion
+     *    entries, but their entryGoto is NOT stable (observed "charge", may also be "ogv" etc.) and
+     *    overlaps across types, so we do NOT key off goto. Instead the chip renders
+     *    entryText="<类型/充电>" (e.g. "国创"/"电影"/"充电") + entryTitle="<片名>", and that leading label
+     *    is exactly one of our keywords. We block whenever entryText matches an enabled label, so
+     *    each toggle is independent and ordinary labels ("话题"/"音乐") never match.
+     *
+     * Every non-matching entry proceeds normally.
      */
-    private fun blockStoryDiversionEntry(blockedGotos: Set<String>) {
+    private fun blockStoryDiversionEntry(blockedGotos: Set<String>, textLabels: Set<String>) {
         val diversionClass = "com.bilibili.video.story.action.widget.StoryDiversionEntryWidget"
             .findClassOrNull(mClassLoader) ?: run {
             Log.x("BlockStoryGoods: StoryDiversionEntryWidget not found")
@@ -84,8 +99,14 @@ class BlockStoryGoodsHook(classLoader: ClassLoader) : BaseHook(classLoader) {
             "com.bilibili.video.story.action.StoryActionType",
             "com.bilibili.video.story.action.j",
         ) { chain ->
-            val goto = currentEntryGoto(chain.thisObject)
-            if (goto != null && goto in blockedGotos) {
+            val info = currentCartInfo(chain.thisObject)
+            val goto = info?.goto
+            val blocked = when {
+                goto == null -> false
+                textLabels.isNotEmpty() && textLabels.any { info.text.orEmpty().contains(it) } -> true
+                else -> goto in blockedGotos
+            }
+            if (blocked) {
                 (chain.thisObject as? View)?.visibility = View.GONE
                 null
             } else {
@@ -95,21 +116,82 @@ class BlockStoryGoodsHook(classLoader: ClassLoader) : BaseHook(classLoader) {
         Log.x("BlockStoryGoods: hooked StoryDiversionEntryWidget.O -> ${oHandle != null}")
     }
 
+    private data class CartInfo(val goto: String?, val text: String?)
+
     /**
-     * Reads the diversion widget's bound controller -> StoryDetail -> cartIconInfo.entryGoto.
-     * All accessor names (getData / getCartIconInfo / getEntryGoto) are kept un-obfuscated in the
-     * app. Returns null on any failure so an unknown entry is never blocked by mistake.
+     * Reads the diversion widget's bound controller -> StoryDetail -> cartIconInfo, returning its
+     * entryGoto/entryText.
+     *
+     * The controller field's declared type is the obfuscated interface com.bilibili.video.story
+     * .action.h, but its single-letter obfuscated name can differ between Bilibili builds, so we
+     * do NOT match by type name. Instead we duck-type: scan every declared field and try the
+     * getData()/getCartIconInfo()/getEntryGoto() accessor chain (these names are stable / kept).
+     * The concrete controller impl is a non-public class, so each method needs setAccessible(true)
+     * before invoke() or reflection throws IllegalAccessException. Returns null when nothing
+     * resolves (never blocking an unknown entry).
      */
-    private fun currentEntryGoto(widget: Any): String? = runCatching {
-        val ctrlField = widget.javaClass.declaredFields.firstOrNull {
-            it.type.name == "com.bilibili.video.story.action.h"
-        } ?: return null
-        ctrlField.isAccessible = true
-        val controller = ctrlField.get(widget) ?: return null
-        val data = controller.javaClass.getMethod("getData").invoke(controller) ?: return null
-        val cartInfo = data.javaClass.getMethod("getCartIconInfo").invoke(data) ?: return null
-        cartInfo.javaClass.getMethod("getEntryGoto").invoke(cartInfo) as? String
-    }.getOrNull()
+    private fun currentCartInfo(widget: Any): CartInfo? {
+        for (field in widget.javaClass.declaredFields) {
+            val info = runCatching {
+                field.isAccessible = true
+                val controller = field.get(widget) ?: return@runCatching null
+                val data = controller.javaClass.getMethod("getData")
+                    .also { it.isAccessible = true }.invoke(controller) ?: return@runCatching null
+                val cartInfo = data.javaClass.getMethod("getCartIconInfo")
+                    .also { it.isAccessible = true }.invoke(data) ?: return@runCatching null
+                val goto = cartInfo.javaClass.getMethod("getEntryGoto")
+                    .also { it.isAccessible = true }.invoke(cartInfo) as? String ?: return@runCatching null
+                val text = runCatching {
+                    cartInfo.javaClass.getMethod("getEntryText")
+                        .also { it.isAccessible = true }.invoke(cartInfo) as? String
+                }.getOrNull()
+                CartInfo(goto, text)
+            }.getOrNull()
+            if (info != null) return info
+        }
+        return null
+    }
+
+    /**
+     * 番剧/电影「影视溯源胶片卡」root-cause block. The visible "<类型> | <片名>" chip (e.g.
+     * "电影 | 大创业家") is driven by StoryDetail.getCollection() with cmd=="ogv-season": the leading
+     * 类型 label is collection.title ("电影"/"番剧"/...), the name is collection.seasonTitle. The same
+     * collection feeds BOTH the OGV season bar (StoryOgvWidget, gated by u.o()) and the inline title
+     * chip (StoryTitleWidget.M2). getCollection() is a real (non-inlined) call site in both.
+     *
+     * We hook getCollection() and return null only when it is an "ogv-season" collection whose
+     * title matches one of the enabled category keyword sets ([categoryKeywords]). That kills both
+     * renderings for the chosen categories (番剧 vs 电影 independently) and leaves every other
+     * collection (UGC 合集 / 分P, and ogv categories not toggled) untouched.
+     */
+    private fun blockOgvCollection(categoryKeywords: Set<String>) {
+        val storyDetail = "com.bilibili.video.story.StoryDetail".findClassOrNull(mClassLoader) ?: run {
+            Log.x("BlockStoryGoods: StoryDetail not found")
+            return
+        }
+        // Resolve the accessors from the actual Collection instance's class at runtime: the inner
+        // class name / classloader can differ, and a pre-looked-up class returning null silently
+        // disabled the whole filter before. Lazily cache once we see the first non-null collection.
+        var mGetCmd: java.lang.reflect.Method? = null
+        var mGetTitle: java.lang.reflect.Method? = null
+        val handle = storyDetail.hookMethod("getCollection") { chain ->
+            val col = chain.proceed()
+            if (col == null) {
+                col
+            } else {
+                if (mGetCmd == null) {
+                    val c = col.javaClass
+                    mGetCmd = runCatching { c.getMethod("getCmd").also { it.isAccessible = true } }.getOrNull()
+                    mGetTitle = runCatching { c.getMethod("getTitle").also { it.isAccessible = true } }.getOrNull()
+                }
+                val cmd = runCatching { mGetCmd?.invoke(col) as? String }.getOrNull()
+                val title = runCatching { mGetTitle?.invoke(col) as? String }.getOrNull()
+                val blocked = cmd == "ogv-season" && categoryKeywords.any { title.orEmpty().contains(it) }
+                if (blocked) null else col
+            }
+        }
+        Log.x("BlockStoryGoods: hooked StoryDetail.getCollection -> ${handle != null} (keywords=$categoryKeywords)")
+    }
 
     /**
      * StoryAdWidget renders the in-video ad CTA overlay (e.g. "应用 · 点击直达…百亿补贴")

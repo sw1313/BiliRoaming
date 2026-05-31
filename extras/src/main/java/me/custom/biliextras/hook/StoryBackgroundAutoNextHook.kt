@@ -101,7 +101,7 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
         hookCancelCheck()
         hookFragmentLifecycleBypass()
         hookStoryPagerPlayer()
-        Log.x("startHook: StoryBackgroundAutoNext (autoNext=$autoNextEnabled mediaButton=$mediaButton)")
+        Log.s("startHook: StoryBackgroundAutoNext (autoNext=$autoNextEnabled mediaButton=$mediaButton)")
     }
 
     /**

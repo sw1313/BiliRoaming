@@ -54,6 +54,7 @@ class ExtrasSettingDialog(context: Context) : AlertDialog.Builder(context) {
                 "disable_chapter_progress",
                 SponsorBlockPrefs.KEY_ENABLED,
                 "show_info",
+                Log.KEY_VERBOSE,
             ).forEach {
                 findPreference(it)?.onPreferenceChangeListener = this
             }

@@ -27,6 +27,16 @@ object Log {
         w(msg)
     }
 
+    const val KEY_VERBOSE = "extras_verbose_log"
+
+    /**
+     * Verbose tracing is opt-in: only errors ([e]) and one-shot startup confirmations ([s]) are
+     * emitted by default. All other channels ([d]/[i]/[w]/[x]) are per-event traces and stay silent
+     * unless the "详细日志" toggle is on, so the LSPosed log only keeps the necessary lines.
+     */
+    private val verbose: Boolean
+        get() = runCatching { ePrefs.getBoolean(KEY_VERBOSE, false) }.getOrDefault(false)
+
     private fun doLog(f: (String, String) -> Int, obj: Any?, toXposed: Boolean = false) {
         val str = if (obj is Throwable) ALog.getStackTraceString(obj) else obj.toString()
         f(Constant.TAG, str)
@@ -35,11 +45,14 @@ object Log {
         }
     }
 
-    fun d(obj: Any?) = doLog(ALog::d, obj)
-    fun i(obj: Any?) = doLog(ALog::i, obj)
+    fun d(obj: Any?) { if (verbose) doLog(ALog::d, obj) }
+    fun i(obj: Any?) { if (verbose) doLog(ALog::i, obj) }
     fun e(obj: Any?) = doLog(ALog::e, obj, true)
-    fun w(obj: Any?) = doLog(ALog::w, obj)
-    fun x(obj: Any?) = doLog(ALog::i, obj, true)
+    fun w(obj: Any?) { if (verbose) doLog(ALog::w, obj) }
+    fun x(obj: Any?) { if (verbose) doLog(ALog::i, obj, true) }
+
+    /** One-shot startup/feature-activation confirmations: always emitted (necessary log). */
+    fun s(obj: Any?) = doLog(ALog::i, obj, true)
 }
 
 fun initHostContext(context: Context) {

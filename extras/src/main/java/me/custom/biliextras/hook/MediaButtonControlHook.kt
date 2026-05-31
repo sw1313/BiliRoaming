@@ -49,7 +49,7 @@ class MediaButtonControlHook(classLoader: ClassLoader) : BaseHook(classLoader) {
         hookStorySkip()
         hookNormalNext()
         hookAdvertiseActions()
-        Log.x("startHook: MediaButtonControl")
+        Log.s("startHook: MediaButtonControl")
     }
 
     /**

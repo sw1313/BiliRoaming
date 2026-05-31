@@ -38,8 +38,8 @@ class XposedInit : XposedModule() {
                 val context = chain.args[0] as android.content.Context
                 if (context.packageName != packageName) return@hookMethod chain.proceed()
                 initHostContext(context)
-                Log.d("BiliExtras activated in $packageName")
-                Log.d("Bilibili version: ${getPackageVersion(packageName)}")
+                Log.s("BiliExtras activated in $packageName")
+                Log.s("Bilibili version: ${getPackageVersion(packageName)}")
                 Log.d("Config: ${ePrefs.all}")
                 Log.toast("漫游扩展已激活")
                 val pkg = BiliPackageLite(classLoader, context)

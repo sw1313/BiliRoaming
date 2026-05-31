@@ -102,6 +102,12 @@
             android:summary="@string/show_info_summary"
             android:title="@string/show_info_title" />
 
+        <SwitchPreference
+            android:defaultValue="false"
+            android:key="extras_verbose_log"
+            android:summary="@string/extras_verbose_log_summary"
+            android:title="@string/extras_verbose_log_title" />
+
         <Preference
             android:key="version"
             android:title="@string/version" />

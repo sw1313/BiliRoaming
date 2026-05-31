@@ -39,7 +39,7 @@ class BiliPackageLite(
 
     init {
         instance = this
-        Log.d("BiliExtras loaded for ${getPackageVersion(context.packageName)}")
+        Log.s("BiliExtras loaded for ${getPackageVersion(context.packageName)}")
     }
 
     fun fastJsonParse() = "parseObject"

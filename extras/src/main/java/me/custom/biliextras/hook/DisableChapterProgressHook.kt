@@ -19,7 +19,7 @@ class DisableChapterProgressHook(mClassLoader: ClassLoader) : BaseHook(mClassLoa
             hookChronosVideoViewPoint()
             hookChronosWatchPointDispatch()
         }
-        Log.x("DisableChapterProgress: started")
+        Log.s("DisableChapterProgress: started")
     }
 
     private fun hookChronosThumbnailInfo() {

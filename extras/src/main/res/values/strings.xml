@@ -45,6 +45,8 @@
     <string name="sponsorblock_settings_summary">服务状态、分类、Toast、统计和服务器地址</string>
     <string name="show_info_title">显示激活提示</string>
     <string name="show_info_summary">哔哩哔哩启动时显示漫游扩展激活 Toast</string>
+    <string name="extras_verbose_log_title">详细日志（调试）</string>
+    <string name="extras_verbose_log_summary">仅排查问题时开启：输出各功能的逐事件追踪日志。关闭时只保留激活确认与错误日志</string>
     <string name="feature_group">功能</string>
     <string name="playback_group">播放与连播</string>
     <string name="block_group">屏蔽推荐与广告</string>

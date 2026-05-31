@@ -43,7 +43,7 @@ class ForegroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoader) {
         hookIsInBackground()
         hookPlayNextInternal()
         hookCompletion()
-        Log.x("startHook: ForegroundAutoNext")
+        Log.s("startHook: ForegroundAutoNext")
     }
 
     private fun readRealBackground(repo: Any): Boolean {

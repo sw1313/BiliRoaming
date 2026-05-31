@@ -34,7 +34,7 @@ class BlockStoryAdHook(classLoader: ClassLoader) : BaseHook(classLoader) {
         }
         val playerClass = instance.storyPagerPlayerClass ?: return
 
-        Log.d("startHook: BlockStoryAd on ${playerClass.name}#$addVideo")
+        Log.s("startHook: BlockStoryAd on ${playerClass.name}#$addVideo")
         playerClass.hookMethod(addVideo, List::class.java) { chain ->
             val list = chain.args[0] as? MutableList<Any?> ?: return@hookMethod chain.proceed()
             val before = list.size

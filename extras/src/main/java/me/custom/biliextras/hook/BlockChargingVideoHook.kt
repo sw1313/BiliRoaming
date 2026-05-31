@@ -51,7 +51,7 @@ class BlockChargingVideoHook(classLoader: ClassLoader) : BaseHook(classLoader) {
 
     override fun startHook() {
         if (!blockCharging && !blockPromoted) return
-        Log.d("startHook: BlockChargingVideo charging=$blockCharging promoted=$blockPromoted")
+        Log.s("startHook: BlockChargingVideo charging=$blockCharging promoted=$blockPromoted")
 
         // 相关视频/连播两处都要过滤充电或运营推广位，只要任一开关开启就挂钩。
         hookViewV1()

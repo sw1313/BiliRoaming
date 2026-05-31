@@ -62,7 +62,7 @@ class SponsorBlockHook(classLoader: ClassLoader) : BaseHook(classLoader) {
     override fun startHook() {
         val enabled = SponsorBlockPrefs.enabled
         if (!enabled) return
-        Log.x("startHook: SponsorBlock")
+        Log.s("startHook: SponsorBlock")
         hookViewReplies()
         hookPlayViewUnite()
         hookStoryVideoChange()
