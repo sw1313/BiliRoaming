@@ -340,7 +340,16 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
                 // Reconcile against D1 exactly like triggerNextStory()/triggerPreviousBackground()
                 // do: the real playing index is never below the pager's current item.
                 val pagerIndex = player.invokeIntGetter("D1", "getIndex") ?: -1
-                val savedTracked = if (trackedIndex >= pagerIndex) trackedIndex else pagerIndex
+                // Only a BACKGROUND auto-next advance pushes the engine (trackedIndex) ahead of the
+                // pager's current item (the pager can't move while the user is away). If
+                // trackedIndex <= pagerIndex nothing advanced in the background - the user merely
+                // switched pages / foreground-swiped and came back - so we must NOT rebuild:
+                // promoting the current video to index 0 would drop every video before it, leaving
+                // the user unable to scroll back up (pull-up just refreshes the list). The advance
+                // path (triggerNextStory) already reconciles a stale-low trackedIndex against D1
+                // before bumping it, so a real advance always lands here as trackedIndex > pagerIndex.
+                val advanced = trackedIndex > pagerIndex
+                val savedTracked = trackedIndex
                 // Capture the background playback position + identity of the video that is
                 // about to become foreground index 0, BEFORE resume/rebuild runs. The rebuild
                 // reopens the video from 0:00, so we hand the progress back via a seek once the
@@ -358,7 +367,7 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
                 Log.x("StoryAutoNext: foreground capture savedPos=$savedPos id=$targetId tracked=$savedTracked")
                 isInBackground = false
                 chain.proceed()
-                if (savedTracked > 0) {
+                if (advanced && savedTracked > 0) {
                     val count = player.invokeIntGetter("N1") ?: 0
                     if (count > savedTracked) {
                         runCatching {
