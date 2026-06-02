@@ -16,25 +16,16 @@ import java.lang.reflect.Modifier
  * Foreground auto-play of related (AI-recommended) videos for normal
  * (non-collection) videos.
  *
- * Approach: instead of an in-place player switch (which never rebuilds the page
- * UI in the foreground), we simply grab the next AI-recommended video's avid and
- * open it as a brand new video page via the bilibili://video/{avid} router. A
- * fresh page guarantees the whole UI (player / metadata / intro / comments)
- * rebuilds, exactly like tapping a related video.
+ * Opens the next relate as a new page via bilibili://video/{avid}, then
+ * finishes the current Activity so the back stack stays clean. Pressing back
+ * from the auto-opened video returns to wherever you were before (feed / search),
+ * not a half-torn-down player page with missing UI.
  *
  * Flow:
- *  1. Hook UGCBackgroundPlayService.x() (the completion handler). For a
- *     foreground normal video, reset the anchor (C()), enable AI mode (G(true)),
- *     build the anchor + request relates (p()/y()), set the pending flag (E) and
- *     suspend so x()'s native loop/pause branch never runs.
- *  2. When the relates finish loading, the native requestSuccess collector
- *     (UGCBackgroundPlayService$3$1) calls t(). We intercept t(), read the next
- *     relate's avid from the repository and open it as a new page instead of
- *     doing the in-place switch.
- *
- * The reusable pieces (hasNextEpisode, openNextRelate, URI helpers) live in the
- * companion object so other hooks (e.g. MediaButtonControlHook) can drive a
- * "next related video" jump on demand.
+ *  1. Hook UGCBackgroundPlayService.x() — for a foreground normal video, reset
+ *     the anchor, enable AI mode, request relates, suspend x() while they load.
+ *  2. Hook t() — read the next relate's avid and open it as a new page instead
+ *     of the in-place switch; finish the source Activity.
  */
 class ForegroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoader) {
 
@@ -43,6 +34,7 @@ class ForegroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoader) {
         hookIsInBackground()
         hookPlayNextInternal()
         hookCompletion()
+        hookOldPageTeardownGuard()
         Log.s("startHook: ForegroundAutoNext")
     }
 
@@ -52,11 +44,6 @@ class ForegroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoader) {
         return oFlow.javaClass.getMethod("getValue").invoke(oFlow) as Boolean
     }
 
-    /**
-     * Force isInBackground() = true while we are loading the relates, so the
-     * loadAIRelatesIfNeeded callback (which checks w()) actually appends them and
-     * emits its success event. We never touch the real StateFlow.
-     */
     private fun hookIsInBackground() {
         val repoClass =
             "com.bilibili.ship.theseus.united.page.background.PageBackgroundPlayRepository"
@@ -69,10 +56,6 @@ class ForegroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoader) {
         }
     }
 
-    /**
-     * Intercept t() (playNextInternal) and, instead of the in-place switch, open
-     * the next relate as a new page.
-     */
     private fun hookPlayNextInternal() {
         val serviceClass =
             "com.bilibili.ship.theseus.ugc.backgroundplay.UGCBackgroundPlayService"
@@ -85,14 +68,9 @@ class ForegroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoader) {
             val repo0 = runCatching {
                 service.javaClass.getDeclaredField("b").apply { isAccessible = true }.get(service)
             }.getOrNull()
-            // Safety net: t() is the shared switch point for BOTH our foreground relate
-            // jump and the native background AI auto-next. We only fake w() (the method)
-            // while loading relates; the real background flag is field `o`. If we are
-            // genuinely in the background, never hijack - let the native AI switch run,
-            // otherwise background auto-play would stop (openVideo/startActivity is
-            // blocked from the background) or fall back to playlist loop.
             if (repo0 != null && runCatching { readRealBackground(repo0) }.getOrDefault(false)) {
                 activating = false
+                clearPendingCompletion()
                 Log.x("ForegroundAutoNext: t() in real background, leaving to native AI")
                 return@hookMethod chain.proceed()
             }
@@ -110,20 +88,29 @@ class ForegroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoader) {
             }.getOrNull()
 
             if (avid != null && avid > 0L) {
-                runCatching {
-                    val ctx = service.javaClass.getDeclaredField("n")
+                cancelFallback()
+                val ctx = runCatching {
+                    service.javaClass.getDeclaredField("n")
                         .apply { isAccessible = true }.get(service) as Context
-                    openVideo(ctx, avid)
-                    Log.x("ForegroundAutoNext: opening relate as new page, avid=$avid")
-                }.onFailure {
-                    Log.x("ForegroundAutoNext: openVideo failed: ${it.message}")
+                }.getOrNull()
+                if (ctx == null) {
+                    resumePendingCompletion(mClassLoader)
                     return@hookMethod chain.proceed()
                 }
-                // Do NOT proceed: skip the in-place switch, the new page takes over.
+                runCatching {
+                    openRelatePage(ctx, avid)
+                    Log.s("ForegroundAutoNext: opened relate page avid=$avid")
+                }.onFailure {
+                    Log.s("ForegroundAutoNext: openRelatePage failed: ${it.message}")
+                    resumePendingCompletion(mClassLoader)
+                    return@hookMethod chain.proceed()
+                }
+                clearPendingCompletion()
                 return@hookMethod null
             }
 
             Log.x("ForegroundAutoNext: no relate avid, falling back to native")
+            resumePendingCompletion(mClassLoader)
             chain.proceed()
         }
     }
@@ -147,23 +134,21 @@ class ForegroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoader) {
                 .apply { isAccessible = true }.get(service)
 
             if (readRealBackground(repo)) {
-                // Genuine background completion: this is the native "background auto-play
-                // related" path. Never touch it; also clear any stale activating flag so
-                // the t() switch below is not hijacked.
                 activating = false
+                clearPendingCompletion()
                 return@hookMethod chain.proceed()
             }
 
-            // Collection with a next part -> let the native handler play it.
             if (hasNextEpisode(service)) {
                 Log.x("ForegroundAutoNext: has next episode, native handles it")
+                clearPendingCompletion()
                 return@hookMethod chain.proceed()
             }
 
-            Log.x("ForegroundAutoNext: foreground completion, requesting relates")
+            Log.s("ForegroundAutoNext: foreground completion, requesting relates")
             activating = true
+            pendingCompletion = chain.args.firstOrNull()
 
-            // Fresh start so p() rebuilds the anchor and re-requests relates.
             runCatching { repo.javaClass.getMethod("C").invoke(repo) }
                 .onFailure { Log.x("ForegroundAutoNext: C() failed: ${it.message}") }
 
@@ -182,7 +167,6 @@ class ForegroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoader) {
                     .invoke(repo, true)
             }.onFailure { Log.x("ForegroundAutoNext: E(true) failed: ${it.message}") }
 
-            // Diagnostics: why did relates (not) load?
             runCatching {
                 val k = repo.javaClass.getDeclaredField("k").apply { isAccessible = true }.get(repo)
                 val hSize = (repo.javaClass.getDeclaredField("h")
@@ -198,48 +182,134 @@ class ForegroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoader) {
                 .getOrNull()
             Log.x("ForegroundAutoNext: y() returned $yResult")
 
-            mainHandler.postDelayed({
+            cancelFallback()
+            val fallback = Runnable {
                 if (activating) {
                     activating = false
-                    // AI ContinuousPlay returned nothing (common for old videos).
-                    // Actively fetch the foreground relate feed, which is universal.
-                    Log.x("ForegroundAutoNext: AI relate timed out, querying relate feed")
+                    Log.s("ForegroundAutoNext: AI relate timed out, querying relate feed")
                     openNextRelate(mClassLoader, service)
                 }
-            }, FALLBACK_MS)
+            }
+            fallbackRunnable = fallback
+            mainHandler.postDelayed(fallback, FALLBACK_MS)
 
             val suspended = getCoroutineSuspended(mClassLoader)
             if (suspended != null) {
-                Log.x("ForegroundAutoNext: suspending, awaiting relate")
+                Log.s("ForegroundAutoNext: x() suspended, awaiting t()")
                 return@hookMethod suspended
             }
 
-            Log.x("ForegroundAutoNext: COROUTINE_SUSPENDED not found, falling through")
+            Log.s("ForegroundAutoNext: COROUTINE_SUSPENDED not found, falling through")
             activating = false
+            clearPendingCompletion()
             chain.proceed()
         }
         Log.x("ForegroundAutoNext: hooked UGCBackgroundPlayService.x()")
     }
 
+    /** Skip pause/end-page only when resuming handleCompleted on a failure path. */
+    private fun hookOldPageTeardownGuard() {
+        val playerClass =
+            "com.bilibili.ship.theseus.keel.player.TheseusKeelPlayer".findClassOrNull(mClassLoader)
+                ?: return
+        playerClass.hookMethod("pause") { chain ->
+            if (suppressOldPageTeardown) null else chain.proceed()
+        }
+
+        val endPageClass =
+            "com.bilibili.ship.theseus.ugc.endpage.UGCEndPageService".findClassOrNull(mClassLoader)
+                ?: return
+        val continuationClass = "kotlin.coroutines.Continuation".findClassOrNull(mClassLoader)
+            ?: return
+        endPageClass.hookMethod("k", continuationClass) { chain ->
+            if (suppressOldPageTeardown) {
+                unitInstance(mClassLoader)
+            } else {
+                chain.proceed()
+            }
+        }
+    }
+
     companion object {
         const val PREF_KEY = "foreground_auto_next"
 
-        // If relates never load, reset so we don't stay stuck.
-        const val FALLBACK_MS = 5000L
+        const val FALLBACK_MS = 2500L
 
         @Volatile
         var activating = false
+
+        @Volatile
+        var fallbackRunnable: Runnable? = null
+
+        @Volatile
+        var pendingCompletion: Any? = null
+
+        @Volatile
+        var suppressOldPageTeardown = false
 
         @Volatile
         var cachedSuspended: Any? = null
 
         val mainHandler = Handler(Looper.getMainLooper())
 
+        fun cancelFallback() {
+            fallbackRunnable?.let { mainHandler.removeCallbacks(it) }
+            fallbackRunnable = null
+        }
+
+        fun clearPendingCompletion() {
+            pendingCompletion = null
+        }
+
         /**
-         * Whether the current video has a next episode in its collection / multi-part.
-         * Mirrors UGCPlayListSchedulingService.b(): episodeListRepo.j(playbackRepo.w()).
-         * service.c = UGCEpisodeListRepository, service.d = UGCPlaybackRepository.
+         * Open the relate as a new page and remove the current Activity from the stack
+         * so back navigation is clean (no broken half-completed page underneath).
          */
+        fun openRelatePage(context: Context, avid: Long) {
+            openVideo(context, avid)
+            if (context is Activity) {
+                mainHandler.post {
+                    if (!context.isFinishing && !context.isDestroyed) {
+                        context.finish()
+                    }
+                }
+            }
+        }
+
+        fun resumePendingCompletion(classLoader: ClassLoader) {
+            val cont = pendingCompletion ?: return
+            pendingCompletion = null
+            suppressOldPageTeardown = true
+            runCatching {
+                val unitClass = Class.forName("kotlin.Unit", false, classLoader)
+                val unit = unitClass.getField("INSTANCE").get(null)
+                val resultClass = Class.forName("kotlin.Result", false, classLoader)
+                val result = resultClass.getMethod("success", Any::class.java).invoke(null, unit)
+                var cls: Class<*>? = cont.javaClass
+                while (cls != null) {
+                    try {
+                        val m = cls.getDeclaredMethod("resumeWith", resultClass)
+                        m.isAccessible = true
+                        m.invoke(cont, result)
+                        Log.s("ForegroundAutoNext: resumed handleCompleted")
+                        return
+                    } catch (_: NoSuchMethodException) {
+                        cls = cls.superclass
+                    }
+                }
+                error("resumeWith not found on ${cont.javaClass.name}")
+            }.onFailure {
+                Log.s("ForegroundAutoNext: resume failed: ${it.message}")
+                Log.e(it)
+            }.also {
+                suppressOldPageTeardown = false
+            }
+        }
+
+        fun unitInstance(classLoader: ClassLoader): Any? = runCatching {
+            Class.forName("kotlin.Unit", false, classLoader).getField("INSTANCE").get(null)
+        }.getOrNull()
+
         fun hasNextEpisode(service: Any): Boolean {
             return runCatching {
                 val episodeRepo = service.javaClass.getDeclaredField("c")
@@ -248,7 +318,6 @@ class ForegroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoader) {
                     .apply { isAccessible = true }.get(service)
                 val current = playbackRepo.javaClass.getMethod("w").invoke(playbackRepo)
 
-                // Diagnostics
                 val curId = runCatching {
                     val avid = current?.javaClass?.getMethod("b")?.invoke(current)
                     val cid = current?.javaClass?.getMethod("d")?.invoke(current)
@@ -267,13 +336,9 @@ class ForegroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoader) {
             }.getOrDefault(false)
         }
 
-        /**
-         * Actively fetch the foreground relate feed for the video currently playing
-         * in the given UGCBackgroundPlayService and open the top result as a new page.
-         * Network call runs on a background thread. Used both as the auto-complete
-         * fallback and as the on-demand "media button next" action.
-         */
         fun openNextRelate(classLoader: ClassLoader, service: Any) {
+            cancelFallback()
+            activating = false
             val avid = runCatching {
                 val playbackRepo = service.javaClass.getDeclaredField("d")
                     .apply { isAccessible = true }.get(service)
@@ -281,77 +346,59 @@ class ForegroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoader) {
                 current?.javaClass?.getMethod("b")?.invoke(current) as? Long
             }.getOrNull()
             if (avid == null || avid <= 0L) {
-                Log.x("ForegroundAutoNext: no current avid for relate feed")
+                Log.s("ForegroundAutoNext: no current avid for relate feed")
+                resumePendingCompletion(classLoader)
                 return
             }
             val ctx = runCatching {
                 service.javaClass.getDeclaredField("n").apply { isAccessible = true }.get(service) as Context
             }.getOrNull()
             if (ctx == null) {
-                Log.x("ForegroundAutoNext: no context for relate feed")
+                Log.s("ForegroundAutoNext: no context for relate feed")
+                resumePendingCompletion(classLoader)
                 return
             }
             Thread {
                 val uri = runCatching { requestRelateUri(classLoader, avid) }
-                    .onFailure { Log.x("ForegroundAutoNext: relate feed request failed: ${it.message}") }
+                    .onFailure { Log.s("ForegroundAutoNext: relate feed failed: ${it.message}") }
                     .getOrNull()
-                if (!uri.isNullOrBlank()) {
-                    mainHandler.post {
+                mainHandler.post {
+                    if (!uri.isNullOrBlank()) {
                         runCatching {
                             openUri(ctx, uri)
-                            Log.x("ForegroundAutoNext: opened foreground relate, uri=$uri")
-                        }.onFailure { Log.x("ForegroundAutoNext: openUri failed: ${it.message}") }
+                            if (ctx is Activity && !ctx.isFinishing && !ctx.isDestroyed) {
+                                ctx.finish()
+                            }
+                            Log.s("ForegroundAutoNext: opened relate feed uri=$uri")
+                        }.onFailure {
+                            Log.s("ForegroundAutoNext: openUri failed: ${it.message}")
+                            resumePendingCompletion(classLoader)
+                        }
+                        clearPendingCompletion()
+                    } else {
+                        Log.s("ForegroundAutoNext: relate feed empty for avid=$avid")
+                        resumePendingCompletion(classLoader)
                     }
-                } else {
-                    Log.x("ForegroundAutoNext: foreground relate feed returned nothing for avid=$avid")
                 }
             }.start()
         }
 
-        /**
-         * Actively query the foreground "相关视频" (RelatesFeed) View API for the given
-         * video and return the first plain-UGC (non-ad / non-promo) relate's router
-         * URI. Unlike the background AI ContinuousPlay API, this endpoint has data for
-         * every video (including very old ones). Must be called off the main thread:
-         * it performs a blocking gRPC call.
-         */
         private fun requestRelateUri(classLoader: ClassLoader, avid: Long): String? {
             val viewMossClass = "com.bapis.bilibili.app.viewunite.v1.ViewMoss"
-                .findClassOrNull(classLoader) ?: run {
-                Log.x("ForegroundAutoNext: ViewMoss not found")
-                return null
-            }
+                .findClassOrNull(classLoader) ?: return null
             val reqClass = "com.bapis.bilibili.app.viewunite.v1.RelatesFeedReq"
-                .findClassOrNull(classLoader) ?: run {
-                Log.x("ForegroundAutoNext: RelatesFeedReq not found")
-                return null
-            }
+                .findClassOrNull(classLoader) ?: return null
             val builder = reqClass.getMethod("newBuilder").invoke(null)
             builder.javaClass.getMethod("setAid", Long::class.javaPrimitiveType).invoke(builder, avid)
             val req = builder.javaClass.getMethod("build").invoke(builder)
-
-            val moss = newViewMoss(viewMossClass) ?: run {
-                Log.x("ForegroundAutoNext: cannot construct ViewMoss")
-                return null
-            }
+            val moss = runCatching {
+                viewMossClass.getDeclaredConstructor().apply { isAccessible = true }.newInstance()
+            }.getOrNull() ?: return null
             val reply = viewMossClass.getMethod("executeRelatesFeed", reqClass).invoke(moss, req)
                 ?: return null
             return extractRelateUri(reply)
         }
 
-        /**
-         * Construct a ViewMoss via its public no-arg constructor (confirmed from the
-         * decompiled class): it defaults to host grpc.biliapi.net:443 with DEF_OPTIONS
-         * and the standard internal (auth) middlewares.
-         */
-        private fun newViewMoss(cls: Class<*>): Any? {
-            return runCatching {
-                cls.getDeclaredConstructor().apply { isAccessible = true }.newInstance()
-            }.onFailure { Log.x("ForegroundAutoNext: ViewMoss ctor failed: ${it.message}") }
-                .getOrNull()
-        }
-
-        /** First plain-UGC relate's router URI, skipping bangumi/game/ad/promo cards. */
         private fun extractRelateUri(reply: Any): String? {
             val relates = runCatching {
                 reply.javaClass.getMethod("getRelatesList").invoke(reply) as? List<*>
