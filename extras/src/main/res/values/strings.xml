@@ -24,7 +24,11 @@
     <string name="story_background_auto_next_title">竖屏后台自动连播</string>
     <string name="story_background_auto_next_summary">竖屏视频后台或息屏播放结束后，自动切到下一个视频</string>
     <string name="foreground_auto_next_title">前台播放自动播放相关视频</string>
-    <string name="foreground_auto_next_summary">普通视频播完后自动播放推荐相关视频（非合集或合集最后一集）</string>
+    <string name="foreground_auto_next_summary">播完后按下方「适用范围」自动播放 AI 推荐相关视频（超时走前台相关视频接口兜底）</string>
+    <string name="foreground_auto_next_scopes_title">前台自动连播适用范围</string>
+    <string name="foreground_auto_next_scopes_summary">勾选的视频类型播完后走 AI 联播流程</string>
+    <string name="foreground_auto_next_orientation_title">前台连播视频方向偏好</string>
+    <string name="foreground_auto_next_orientation_summary">从 AI 联播列表或相关视频列表中优先挑选符合方向的视频</string>
     <string name="media_button_control_title">媒体按键控制上下视频</string>
     <string name="media_button_control_summary">蓝牙耳机/线控的上一曲、下一曲按键切换视频（下一个全场景支持，上一个仅在可行场景支持，部分场景需配合对应连播开关）</string>
     <string name="hide_vip_center_title">屏蔽我的界面会员中心</string>

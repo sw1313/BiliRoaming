@@ -35,7 +35,7 @@ class ForegroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoader) {
         hookPlayNextInternal()
         hookCompletion()
         hookOldPageTeardownGuard()
-        Log.s("startHook: ForegroundAutoNext")
+        Log.s("startHook: ForegroundAutoNext (${ForegroundAutoNextPrefs.enabledShortTitles().joinToString("、")}, ${ForegroundAutoNextPrefs.orientation().title})")
     }
 
     private fun readRealBackground(repo: Any): Boolean {
@@ -75,6 +75,21 @@ class ForegroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoader) {
                 return@hookMethod chain.proceed()
             }
             activating = false
+            val ctx = runCatching {
+                service.javaClass.getDeclaredField("n")
+                    .apply { isAccessible = true }.get(service) as Context
+            }.getOrNull()
+            if (ctx == null) {
+                resumePendingCompletion(mClassLoader)
+                return@hookMethod chain.proceed()
+            }
+            val preferPortrait = ForegroundAutoNextPrefs.resolvePreferPortrait(service)
+            if (preferPortrait != null) {
+                cancelFallback()
+                openNextWithOrientationPick(mClassLoader, service, ctx, preferPortrait)
+                clearPendingCompletion()
+                return@hookMethod null
+            }
             val avid = runCatching {
                 val repo = service.javaClass.getDeclaredField("b")
                     .apply { isAccessible = true }.get(service)
@@ -89,17 +104,10 @@ class ForegroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoader) {
 
             if (avid != null && avid > 0L) {
                 cancelFallback()
-                val ctx = runCatching {
-                    service.javaClass.getDeclaredField("n")
-                        .apply { isAccessible = true }.get(service) as Context
-                }.getOrNull()
-                if (ctx == null) {
-                    resumePendingCompletion(mClassLoader)
-                    return@hookMethod chain.proceed()
-                }
                 runCatching {
-                    openRelatePage(ctx, avid)
-                    Log.s("ForegroundAutoNext: opened relate page avid=$avid")
+                    val fullscreen = isInFullscreen(service)
+                    openRelatePage(ctx, avid, fullscreen)
+                    Log.s("ForegroundAutoNext: opened relate page avid=$avid fullscreen=$fullscreen")
                 }.onFailure {
                     Log.s("ForegroundAutoNext: openRelatePage failed: ${it.message}")
                     resumePendingCompletion(mClassLoader)
@@ -139,8 +147,9 @@ class ForegroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoader) {
                 return@hookMethod chain.proceed()
             }
 
-            if (hasNextEpisode(service)) {
-                Log.x("ForegroundAutoNext: has next episode, native handles it")
+            if (!ForegroundAutoNextPrefs.shouldApplyAiAutoNext(service)) {
+                val scope = ForegroundAutoNextPrefs.classify(service)
+                Log.x("ForegroundAutoNext: scope=$scope disabled, native handles completion")
                 clearPendingCompletion()
                 return@hookMethod chain.proceed()
             }
@@ -233,6 +242,9 @@ class ForegroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoader) {
     companion object {
         const val PREF_KEY = "foreground_auto_next"
 
+        /** AutoFullscreen (2): enters fullscreen but keeps back-to-halfscreen handler. ForcedInFullscreen (1) disables it. */
+        private const val FULLSCREEN_MODE_AUTO = "2"
+
         const val FALLBACK_MS = 2500L
 
         @Volatile
@@ -265,14 +277,10 @@ class ForegroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoader) {
          * Open the relate as a new page and remove the current Activity from the stack
          * so back navigation is clean (no broken half-completed page underneath).
          */
-        fun openRelatePage(context: Context, avid: Long) {
-            openVideo(context, avid)
+        fun openRelatePage(context: Context, avid: Long, fullscreen: Boolean = false) {
+            openVideo(context, avid, fullscreen)
             if (context is Activity) {
-                mainHandler.post {
-                    if (!context.isFinishing && !context.isDestroyed) {
-                        context.finish()
-                    }
-                }
+                mainHandler.post { finishSourceActivity(context) }
             }
         }
 
@@ -339,17 +347,6 @@ class ForegroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoader) {
         fun openNextRelate(classLoader: ClassLoader, service: Any) {
             cancelFallback()
             activating = false
-            val avid = runCatching {
-                val playbackRepo = service.javaClass.getDeclaredField("d")
-                    .apply { isAccessible = true }.get(service)
-                val current = playbackRepo.javaClass.getMethod("w").invoke(playbackRepo)
-                current?.javaClass?.getMethod("b")?.invoke(current) as? Long
-            }.getOrNull()
-            if (avid == null || avid <= 0L) {
-                Log.s("ForegroundAutoNext: no current avid for relate feed")
-                resumePendingCompletion(classLoader)
-                return
-            }
             val ctx = runCatching {
                 service.javaClass.getDeclaredField("n").apply { isAccessible = true }.get(service) as Context
             }.getOrNull()
@@ -358,6 +355,18 @@ class ForegroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoader) {
                 resumePendingCompletion(classLoader)
                 return
             }
+            val preferPortrait = ForegroundAutoNextPrefs.resolvePreferPortrait(service)
+            if (preferPortrait != null) {
+                openNextWithOrientationPick(classLoader, service, ctx, preferPortrait)
+                return
+            }
+            val avid = getCurrentAvid(service)
+            if (avid == null || avid <= 0L) {
+                Log.s("ForegroundAutoNext: no current avid for relate feed")
+                resumePendingCompletion(classLoader)
+                return
+            }
+            val fullscreen = isInFullscreen(service)
             Thread {
                 val uri = runCatching { requestRelateUri(classLoader, avid) }
                     .onFailure { Log.s("ForegroundAutoNext: relate feed failed: ${it.message}") }
@@ -365,11 +374,9 @@ class ForegroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoader) {
                 mainHandler.post {
                     if (!uri.isNullOrBlank()) {
                         runCatching {
-                            openUri(ctx, uri)
-                            if (ctx is Activity && !ctx.isFinishing && !ctx.isDestroyed) {
-                                ctx.finish()
-                            }
-                            Log.s("ForegroundAutoNext: opened relate feed uri=$uri")
+                            openUri(ctx, uri, fullscreen)
+                            finishSourceActivity(ctx)
+                            Log.s("ForegroundAutoNext: opened relate feed uri=$uri fullscreen=$fullscreen")
                         }.onFailure {
                             Log.s("ForegroundAutoNext: openUri failed: ${it.message}")
                             resumePendingCompletion(classLoader)
@@ -383,53 +390,298 @@ class ForegroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoader) {
             }.start()
         }
 
-        private fun requestRelateUri(classLoader: ClassLoader, avid: Long): String? {
+        private data class RelateCandidate(
+            val avid: Long,
+            val uri: String?,
+            val portrait: Boolean?,
+        )
+
+        private fun openNextWithOrientationPick(
+            classLoader: ClassLoader,
+            service: Any,
+            ctx: Context,
+            preferPortrait: Boolean,
+        ) {
+            val currentAvid = getCurrentAvid(service)
+            if (currentAvid == null || currentAvid <= 0L) {
+                Log.s("ForegroundAutoNext: no current avid for oriented pick")
+                resumePendingCompletion(classLoader)
+                return
+            }
+            val fullscreen = isInFullscreen(service)
+            Thread {
+                val feed = runCatching { requestRelateCandidates(classLoader, currentAvid) }
+                    .onFailure { Log.s("ForegroundAutoNext: relate feed failed: ${it.message}") }
+                    .getOrDefault(emptyList())
+                val aiAvids = collectAiAvids(service)
+                val picked = pickRelate(aiAvids, feed, preferPortrait)
+                mainHandler.post {
+                    if (picked == null) {
+                        Log.s("ForegroundAutoNext: oriented pick found nothing for avid=$currentAvid")
+                        resumePendingCompletion(classLoader)
+                        return@post
+                    }
+                    runCatching {
+                        if (!picked.uri.isNullOrBlank()) {
+                            openUri(ctx, picked.uri, fullscreen)
+                            finishSourceActivity(ctx)
+                        } else {
+                            openRelatePage(ctx, picked.avid, fullscreen)
+                        }
+                        Log.s(
+                            "ForegroundAutoNext: oriented pick avid=${picked.avid} " +
+                                "portrait=${picked.portrait} prefer=$preferPortrait ai=${aiAvids.size} feed=${feed.size}",
+                        )
+                    }.onFailure {
+                        Log.s("ForegroundAutoNext: oriented open failed: ${it.message}")
+                        resumePendingCompletion(classLoader)
+                        return@post
+                    }
+                    clearPendingCompletion()
+                }
+            }.start()
+        }
+
+        private fun finishSourceActivity(ctx: Context) {
+            if (ctx is Activity && !ctx.isFinishing && !ctx.isDestroyed) {
+                ctx.finish()
+            }
+        }
+
+        private fun getCurrentAvid(service: Any): Long? = runCatching {
+            val playbackRepo = service.javaClass.getDeclaredField("d")
+                .apply { isAccessible = true }.get(service)
+            val current = playbackRepo.javaClass.getMethod("w").invoke(playbackRepo)
+            current?.javaClass?.getMethod("b")?.invoke(current) as? Long
+        }.getOrNull()
+
+        private fun collectAiAvids(service: Any): List<Long> = runCatching {
+            val repo = service.javaClass.getDeclaredField("b")
+                .apply { isAccessible = true }.get(service)
+            val size = repo.javaClass.getMethod("m").invoke(repo) as Int
+            val cur = repo.javaClass.getMethod("q").invoke(repo) as Int
+            if (size <= 0 || cur + 1 >= size) return@runCatching emptyList<Long>()
+            ((cur + 1) until size).mapNotNull { idx ->
+                val item = repo.javaClass.getMethod("o", Int::class.javaPrimitiveType)
+                    .invoke(repo, idx) ?: return@mapNotNull null
+                item.javaClass.getMethod("a").invoke(item) as? Long
+            }.filter { it > 0L }
+        }.getOrDefault(emptyList())
+
+        private fun pickRelate(
+            aiAvidsInOrder: List<Long>,
+            feed: List<RelateCandidate>,
+            preferPortrait: Boolean,
+        ): RelateCandidate? {
+            val portraitByAvid = feed.associate { it.avid to it.portrait }
+            val uriByAvid = feed.associate { it.avid to it.uri }
+            for (avid in aiAvidsInOrder) {
+                if (portraitByAvid[avid] == preferPortrait) {
+                    return RelateCandidate(avid, uriByAvid[avid], preferPortrait)
+                }
+            }
+            for (candidate in feed) {
+                if (candidate.portrait == preferPortrait) return candidate
+            }
+            val fallbackAvid = aiAvidsInOrder.firstOrNull()
+            if (fallbackAvid != null) {
+                return RelateCandidate(fallbackAvid, uriByAvid[fallbackAvid], portraitByAvid[fallbackAvid])
+            }
+            return feed.firstOrNull()
+        }
+
+        private fun requestRelateCandidates(classLoader: ClassLoader, avid: Long): List<RelateCandidate> {
             val viewMossClass = "com.bapis.bilibili.app.viewunite.v1.ViewMoss"
-                .findClassOrNull(classLoader) ?: return null
+                .findClassOrNull(classLoader) ?: return emptyList()
             val reqClass = "com.bapis.bilibili.app.viewunite.v1.RelatesFeedReq"
-                .findClassOrNull(classLoader) ?: return null
+                .findClassOrNull(classLoader) ?: return emptyList()
             val builder = reqClass.getMethod("newBuilder").invoke(null)
             builder.javaClass.getMethod("setAid", Long::class.javaPrimitiveType).invoke(builder, avid)
             val req = builder.javaClass.getMethod("build").invoke(builder)
             val moss = runCatching {
                 viewMossClass.getDeclaredConstructor().apply { isAccessible = true }.newInstance()
-            }.getOrNull() ?: return null
+            }.getOrNull() ?: return emptyList()
             val reply = viewMossClass.getMethod("executeRelatesFeed", reqClass).invoke(moss, req)
-                ?: return null
-            return extractRelateUri(reply)
+                ?: return emptyList()
+            return parseRelateCandidates(reply)
         }
 
-        private fun extractRelateUri(reply: Any): String? {
+        private fun parseRelateCandidates(reply: Any): List<RelateCandidate> {
             val relates = runCatching {
                 reply.javaClass.getMethod("getRelatesList").invoke(reply) as? List<*>
-            }.getOrNull() ?: return null
-            for (card in relates) {
-                card ?: continue
-                val hasAv = runCatching {
-                    card.javaClass.getMethod("hasAv").invoke(card) as Boolean
-                }.getOrDefault(false)
-                if (!hasAv) continue
-                val isPromo = runCatching {
-                    card.javaClass.getMethod("hasCmStock").invoke(card) as Boolean
-                }.getOrDefault(false)
-                if (isPromo) continue
-                val basic = card.javaClass.getMethod("getBasicInfo").invoke(card) ?: continue
-                val uri = basic.javaClass.getMethod("getUri").invoke(basic) as? String
-                if (!uri.isNullOrBlank()) return uri
+            }.getOrNull() ?: return emptyList()
+            return relates.mapNotNull { card -> card?.let { parseRelateCard(it) } }
+        }
+
+        private fun parseRelateCard(card: Any): RelateCandidate? {
+            val hasAv = runCatching {
+                card.javaClass.getMethod("hasAv").invoke(card) as Boolean
+            }.getOrDefault(false)
+            if (!hasAv) return null
+            val isPromo = runCatching {
+                card.javaClass.getMethod("hasCmStock").invoke(card) as Boolean
+            }.getOrDefault(false)
+            if (isPromo) return null
+            val basic = card.javaClass.getMethod("getBasicInfo").invoke(card) ?: return null
+            val uri = basic.javaClass.getMethod("getUri").invoke(basic) as? String
+            if (uri.isNullOrBlank()) return null
+            val avid = avidFromUri(uri) ?: return null
+            val portrait = runCatching {
+                val av = card.javaClass.getMethod("getAv").invoke(card) ?: return@runCatching null
+                if (av.javaClass.getMethod("hasDimension").invoke(av) as Boolean) {
+                    isPortraitDimension(av.javaClass.getMethod("getDimension").invoke(av)!!)
+                } else {
+                    null
+                }
+            }.getOrNull()
+            return RelateCandidate(avid, uri, portrait)
+        }
+
+        private fun avidFromUri(uri: String): Long? {
+            val path = Uri.parse(uri).path ?: return null
+            return path.split("/").lastOrNull()?.toLongOrNull()
+        }
+
+        private fun isPortraitDimension(dimension: Any): Boolean {
+            val rawW = (dimension.javaClass.getMethod("getWidth").invoke(dimension) as Number).toLong()
+            val rawH = (dimension.javaClass.getMethod("getHeight").invoke(dimension) as Number).toLong()
+            val rotate = (dimension.javaClass.getMethod("getRotate").invoke(dimension) as Number).toLong()
+            val width = if (rotate == 1L) rawH else rawW
+            val height = if (rotate == 1L) rawW else rawH
+            return height > width
+        }
+
+        private fun requestRelateUri(classLoader: ClassLoader, avid: Long): String? {
+            return requestRelateCandidates(classLoader, avid).firstOrNull()?.uri
+        }
+
+        fun openVideo(context: Context, avid: Long, fullscreen: Boolean = false) {
+            val uri = if (fullscreen) {
+                "bilibili://video/$avid?fullscreen_mode=$FULLSCREEN_MODE_AUTO"
+            } else {
+                "bilibili://video/$avid"
             }
-            return null
+            openUri(context, uri)
         }
 
-        fun openVideo(context: Context, avid: Long) {
-            openUri(context, "bilibili://video/$avid")
-        }
-
-        fun openUri(context: Context, uri: String) {
-            val intent = Intent(Intent.ACTION_VIEW, Uri.parse(uri)).apply {
+        fun openUri(context: Context, uri: String, fullscreen: Boolean = false) {
+            val targetUri = if (fullscreen) withFullscreenMode(uri) else uri
+            val intent = Intent(Intent.ACTION_VIEW, Uri.parse(targetUri)).apply {
                 setPackage(context.packageName)
                 if (context !is Activity) addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             }
             context.startActivity(intent)
+        }
+
+        /** Whether the current UGC page is in fullscreen (whole-scene) mode. */
+        fun isInFullscreen(service: Any): Boolean {
+            val ctx = runCatching {
+                service.javaClass.getDeclaredField("n").apply { isAccessible = true }.get(service)
+            }.getOrNull()
+            val roots = listOfNotNull(service, ctx)
+            for (root in roots) {
+                findScreenStateRepo(root)?.let { repo ->
+                    val fullscreen = readScreenStateFullscreen(repo)
+                    Log.x("ForegroundAutoNext: isInFullscreen=$fullscreen (screenstate)")
+                    return fullscreen
+                }
+            }
+            for (root in roots) {
+                findPlayerContainer(root)?.let { container ->
+                    val fullscreen = runCatching {
+                        val render = container.javaClass.getMethod("getRenderContainerService")
+                            .invoke(container)
+                        render.javaClass.getMethod("isInWholeSceneMode").invoke(render) as Boolean
+                    }.getOrDefault(false)
+                    Log.x("ForegroundAutoNext: isInFullscreen=$fullscreen (wholeScene)")
+                    return fullscreen
+                }
+            }
+            return false
+        }
+
+        private fun withFullscreenMode(uri: String): String {
+            val parsed = Uri.parse(uri)
+            val builder = parsed.buildUpon().clearQuery()
+            for (name in parsed.queryParameterNames) {
+                if (name == "fullscreen_mode") continue
+                for (value in parsed.getQueryParameters(name)) {
+                    builder.appendQueryParameter(name, value)
+                }
+            }
+            builder.appendQueryParameter("fullscreen_mode", FULLSCREEN_MODE_AUTO)
+            return builder.build().toString()
+        }
+
+        private fun readScreenStateFullscreen(repo: Any): Boolean {
+            val state = repo.javaClass.getMethod("h").invoke(repo) ?: return false
+            return state.javaClass.getMethod("b").invoke(state) as? Boolean ?: false
+        }
+
+        private fun looksLikeScreenStateRepo(obj: Any): Boolean = runCatching {
+            val cls = obj.javaClass
+            cls.getMethod("h")
+            cls.getMethod("c")
+            cls.getMethod("j", Any::class.java, Boolean::class.javaPrimitiveType)
+            true
+        }.getOrDefault(false)
+
+        private fun findScreenStateRepo(root: Any, maxDepth: Int = 4): Any? {
+            val visited = mutableSetOf<Int>()
+            val queue = ArrayDeque<Pair<Any, Int>>()
+            queue.add(root to 0)
+            while (queue.isNotEmpty()) {
+                val (obj, depth) = queue.removeFirst()
+                val id = System.identityHashCode(obj)
+                if (!visited.add(id)) continue
+                if (looksLikeScreenStateRepo(obj)) return obj
+                if (depth >= maxDepth) continue
+                for (field in obj.javaClass.declaredFields) {
+                    runCatching {
+                        field.isAccessible = true
+                        val value = field.get(obj) ?: return@runCatching
+                        if (shouldTraverseForScreenState(value)) {
+                            queue.add(value to depth + 1)
+                        }
+                    }
+                }
+            }
+            return null
+        }
+
+        private fun findPlayerContainer(root: Any, maxDepth: Int = 4): Any? {
+            val visited = mutableSetOf<Int>()
+            val queue = ArrayDeque<Pair<Any, Int>>()
+            queue.add(root to 0)
+            while (queue.isNotEmpty()) {
+                val (obj, depth) = queue.removeFirst()
+                val id = System.identityHashCode(obj)
+                if (!visited.add(id)) continue
+                if (obj.javaClass.name == "tv.danmaku.biliplayerv2.PlayerContainer") return obj
+                if (depth >= maxDepth) continue
+                for (field in obj.javaClass.declaredFields) {
+                    runCatching {
+                        field.isAccessible = true
+                        val value = field.get(obj) ?: return@runCatching
+                        if (shouldTraverseForScreenState(value)) {
+                            queue.add(value to depth + 1)
+                        }
+                    }
+                }
+            }
+            return null
+        }
+
+        private fun shouldTraverseForScreenState(value: Any): Boolean {
+            if (value is String || value is Number || value is Boolean || value is Char) return false
+            if (value is Class<*>) return false
+            val name = value.javaClass.name
+            if (name.startsWith("java.") || name.startsWith("kotlin.") ||
+                name.startsWith("kotlinx.") || name.startsWith("android.") && value !is Activity
+            ) {
+                return false
+            }
+            return true
         }
 
         fun getCoroutineSuspended(classLoader: ClassLoader): Any? {

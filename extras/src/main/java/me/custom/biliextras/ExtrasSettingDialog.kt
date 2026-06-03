@@ -19,6 +19,7 @@ import android.widget.LinearLayout
 import android.widget.ListView
 import android.widget.TextView
 import me.custom.biliextras.hook.StoryDiversionPrefs
+import me.custom.biliextras.hook.ForegroundAutoNextPrefs
 import me.custom.biliextras.sponsorblock.SponsorBlockApi
 import me.custom.biliextras.sponsorblock.SponsorBlockCategory
 import me.custom.biliextras.sponsorblock.SponsorBlockPrefs
@@ -60,8 +61,12 @@ class ExtrasSettingDialog(context: Context) : AlertDialog.Builder(context) {
             }
             findPreference("sponsorblock_settings")?.onPreferenceClickListener = this
             findPreference("story_diversion_settings")?.onPreferenceClickListener = this
+            findPreference("foreground_auto_next_scopes")?.onPreferenceClickListener = this
+            findPreference("foreground_auto_next_orientation")?.onPreferenceClickListener = this
             updateSponsorBlockSummary()
             updateStoryDiversionSummary()
+            updateForegroundAutoNextSummary()
+            updateForegroundAutoNextOrientationSummary()
         }
 
         override fun onPreferenceChange(preference: Preference?, newValue: Any?): Boolean {
@@ -69,6 +74,8 @@ class ExtrasSettingDialog(context: Context) : AlertDialog.Builder(context) {
             if (newValue is Boolean) {
                 ePrefs.edit().putBoolean(key, newValue).commit()
                 updateSponsorBlockSummary()
+                updateForegroundAutoNextSummary()
+                updateForegroundAutoNextOrientationSummary()
             }
             return true
         }
@@ -81,6 +88,14 @@ class ExtrasSettingDialog(context: Context) : AlertDialog.Builder(context) {
                 }
                 "story_diversion_settings" -> {
                     showStoryDiversionSettings()
+                    true
+                }
+                "foreground_auto_next_scopes" -> {
+                    showForegroundAutoNextScopes()
+                    true
+                }
+                "foreground_auto_next_orientation" -> {
+                    showForegroundAutoNextOrientation()
                     true
                 }
                 else -> false
@@ -100,6 +115,58 @@ class ExtrasSettingDialog(context: Context) : AlertDialog.Builder(context) {
                 .joinToString("、")
                 .ifBlank { "未屏蔽任何入口" }
             findPreference("story_diversion_settings")?.summary = "已屏蔽：$blocked"
+        }
+
+        private fun updateForegroundAutoNextSummary() {
+            val enabled = ForegroundAutoNextPrefs.enabledShortTitles()
+                .joinToString("、")
+                .ifBlank { "未勾选任何类型" }
+            findPreference("foreground_auto_next_scopes")?.summary = "已启用：$enabled"
+        }
+
+        private fun updateForegroundAutoNextOrientationSummary() {
+            findPreference("foreground_auto_next_orientation")?.summary =
+                "当前：${ForegroundAutoNextPrefs.orientation().title}"
+        }
+
+        private fun showForegroundAutoNextOrientation() {
+            val context = activity ?: return
+            val entries = ForegroundAutoNextPrefs.orientationEntries
+            val titles = entries.map { it.title }.toTypedArray()
+            val current = ForegroundAutoNextPrefs.orientation()
+            AlertDialog.Builder(context)
+                .setTitle("前台连播视频方向偏好")
+                .setSingleChoiceItems(titles, entries.indexOf(current).coerceAtLeast(0)) { dialog, which ->
+                    ePrefs.edit()
+                        .putString(ForegroundAutoNextPrefs.KEY_ORIENTATION, entries[which].value)
+                        .commit()
+                    updateForegroundAutoNextOrientationSummary()
+                    dialog.dismiss()
+                }
+                .setNegativeButton(android.R.string.cancel, null)
+                .show()
+        }
+
+        private fun showForegroundAutoNextScopes() {
+            val context = activity ?: return
+            val entries = ForegroundAutoNextPrefs.allEntries
+            val titles = entries.map { it.title }.toTypedArray()
+            val checked = entries.map { ForegroundAutoNextPrefs.isEnabled(it.key) }.toBooleanArray()
+            AlertDialog.Builder(context)
+                .setTitle("前台自动连播适用范围")
+                .setMultiChoiceItems(titles, checked) { _, which, isChecked ->
+                    checked[which] = isChecked
+                }
+                .setNegativeButton(android.R.string.cancel, null)
+                .setPositiveButton(android.R.string.ok) { _, _ ->
+                    val editor = ePrefs.edit()
+                    entries.forEachIndexed { index, entry ->
+                        editor.putBoolean(entry.key, checked[index])
+                    }
+                    editor.commit()
+                    updateForegroundAutoNextSummary()
+                }
+                .show()
         }
 
         private fun showStoryDiversionSettings() {

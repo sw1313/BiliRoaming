@@ -106,8 +106,8 @@ class MediaButtonControlHook(classLoader: ClassLoader) : BaseHook(classLoader) {
                 outer.javaClass.getDeclaredField("c").apply { isAccessible = true }.get(outer)
             }.getOrNull() ?: return@hookMethod chain.proceed()
 
-            if (ForegroundAutoNextHook.hasNextEpisode(service)) {
-                Log.x("MediaButton: normal foreground next has episode, native")
+            if (!ForegroundAutoNextPrefs.shouldApplyAiAutoNext(service)) {
+                Log.x("MediaButton: normal foreground next scope disabled, native")
                 return@hookMethod chain.proceed()
             }
 

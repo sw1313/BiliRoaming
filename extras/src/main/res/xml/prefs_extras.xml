@@ -8,6 +8,16 @@
             android:summary="@string/foreground_auto_next_summary"
             android:title="@string/foreground_auto_next_title" />
 
+        <Preference
+            android:key="foreground_auto_next_scopes"
+            android:summary="@string/foreground_auto_next_scopes_summary"
+            android:title="@string/foreground_auto_next_scopes_title" />
+
+        <Preference
+            android:key="foreground_auto_next_orientation"
+            android:summary="@string/foreground_auto_next_orientation_summary"
+            android:title="@string/foreground_auto_next_orientation_title" />
+
         <SwitchPreference
             android:defaultValue="false"
             android:key="story_background_auto_next"
