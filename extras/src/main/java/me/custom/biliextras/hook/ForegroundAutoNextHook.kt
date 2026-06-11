@@ -2,6 +2,7 @@ package me.custom.biliextras.hook
 
 import android.app.Activity
 import android.content.Context
+import android.content.ContextWrapper
 import android.content.Intent
 import android.net.Uri
 import android.os.Handler
@@ -34,15 +35,12 @@ class ForegroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoader) {
         hookIsInBackground()
         hookPlayNextInternal()
         hookCompletion()
+        hookUgcDetailPauseGuard()
         hookOldPageTeardownGuard()
         Log.s("startHook: ForegroundAutoNext (${ForegroundAutoNextPrefs.enabledShortTitles().joinToString("、")}, ${ForegroundAutoNextPrefs.orientation().title})")
     }
 
-    private fun readRealBackground(repo: Any): Boolean {
-        val oFlow = repo.javaClass.getDeclaredField("o")
-            .apply { isAccessible = true }.get(repo)
-        return oFlow.javaClass.getMethod("getValue").invoke(oFlow) as Boolean
-    }
+    private fun readRealBackground(repo: Any): Boolean = Companion.readRealBackground(repo)
 
     private fun hookIsInBackground() {
         val repoClass =
@@ -74,6 +72,10 @@ class ForegroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoader) {
                 Log.x("ForegroundAutoNext: t() in real background, leaving to native AI")
                 return@hookMethod chain.proceed()
             }
+            if (!isEligibleForForegroundAutoNext(service)) {
+                abortActivation(mClassLoader, "t() no longer eligible")
+                return@hookMethod chain.proceed()
+            }
             activating = false
             val ctx = runCatching {
                 service.javaClass.getDeclaredField("n")
@@ -86,21 +88,11 @@ class ForegroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoader) {
             val preferPortrait = ForegroundAutoNextPrefs.resolvePreferPortrait(service)
             if (preferPortrait != null) {
                 cancelFallback()
-                openNextWithOrientationPick(mClassLoader, service, ctx, preferPortrait)
+                openNextWithOrientationPick(mClassLoader, service, ctx, preferPortrait, openGeneration)
                 clearPendingCompletion()
                 return@hookMethod null
             }
-            val avid = runCatching {
-                val repo = service.javaClass.getDeclaredField("b")
-                    .apply { isAccessible = true }.get(service)
-                val size = repo.javaClass.getMethod("m").invoke(repo) as Int
-                val cur = repo.javaClass.getMethod("q").invoke(repo) as Int
-                if (size <= 0) return@runCatching null
-                val idx = (cur + 1).coerceIn(0, size - 1)
-                val item = repo.javaClass.getMethod("o", Int::class.javaPrimitiveType)
-                    .invoke(repo, idx) ?: return@runCatching null
-                item.javaClass.getMethod("a").invoke(item) as Long
-            }.getOrNull()
+            val avid = pickNextAiAvid(service)
 
             if (avid != null && avid > 0L) {
                 cancelFallback()
@@ -117,9 +109,10 @@ class ForegroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoader) {
                 return@hookMethod null
             }
 
-            Log.x("ForegroundAutoNext: no relate avid, falling back to native")
-            resumePendingCompletion(mClassLoader)
-            chain.proceed()
+            Log.x("ForegroundAutoNext: no playable relate avid, trying relate feed")
+            openNextRelate(mClassLoader, service, openGeneration)
+            clearPendingCompletion()
+            return@hookMethod null
         }
     }
 
@@ -154,7 +147,14 @@ class ForegroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoader) {
                 return@hookMethod chain.proceed()
             }
 
+            if (!isEligibleForForegroundAutoNext(service)) {
+                Log.x("ForegroundAutoNext: skip completion, not eligible foreground UGC page")
+                clearPendingCompletion()
+                return@hookMethod chain.proceed()
+            }
+
             Log.s("ForegroundAutoNext: foreground completion, requesting relates")
+            val gen = ++openGeneration
             activating = true
             pendingCompletion = chain.args.firstOrNull()
 
@@ -193,10 +193,14 @@ class ForegroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoader) {
 
             cancelFallback()
             val fallback = Runnable {
-                if (activating) {
+                if (activating && gen == openGeneration) {
+                    if (!isEligibleForForegroundAutoNext(service)) {
+                        abortActivation(mClassLoader, "fallback not eligible")
+                        return@Runnable
+                    }
                     activating = false
                     Log.s("ForegroundAutoNext: AI relate timed out, querying relate feed")
-                    openNextRelate(mClassLoader, service)
+                    openNextRelate(mClassLoader, service, gen)
                 }
             }
             fallbackRunnable = fallback
@@ -214,6 +218,19 @@ class ForegroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoader) {
             chain.proceed()
         }
         Log.x("ForegroundAutoNext: hooked UGCBackgroundPlayService.x()")
+    }
+
+    /** Cancel pending relate open when the UGC detail page leaves the foreground (e.g. user switches to Story). */
+    private fun hookUgcDetailPauseGuard() {
+        val activityClass =
+            "com.bilibili.ship.theseus.detail.UnitedBizDetailsActivity".findClassOrNull(mClassLoader)
+                ?: return
+        activityClass.hookMethod("onPause") { chain ->
+            if (activating || pendingCompletion != null || fallbackRunnable != null) {
+                abortActivation(mClassLoader, "UGC detail onPause")
+            }
+            chain.proceed()
+        }
     }
 
     /** Skip pause/end-page only when resuming handleCompleted on a failure path. */
@@ -262,7 +279,85 @@ class ForegroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoader) {
         @Volatile
         var cachedSuspended: Any? = null
 
+        /** Bumped when activation is aborted or a new completion starts; stale async opens are dropped. */
+        @Volatile
+        var openGeneration = 0
+
         val mainHandler = Handler(Looper.getMainLooper())
+
+        fun readRealBackground(repo: Any): Boolean {
+            val oFlow = repo.javaClass.getDeclaredField("o")
+                .apply { isAccessible = true }.get(repo)
+            return oFlow.javaClass.getMethod("getValue").invoke(oFlow) as Boolean
+        }
+
+        fun abortActivation(classLoader: ClassLoader, reason: String) {
+            if (!activating && pendingCompletion == null && fallbackRunnable == null) return
+            Log.x("ForegroundAutoNext: abort ($reason)")
+            openGeneration++
+            activating = false
+            cancelFallback()
+            if (pendingCompletion != null) {
+                resumePendingCompletion(classLoader)
+            }
+        }
+
+        fun isEligibleForForegroundAutoNext(service: Any): Boolean {
+            val repo = runCatching {
+                service.javaClass.getDeclaredField("b").apply { isAccessible = true }.get(service)
+            }.getOrNull() ?: return false
+            if (readRealBackground(repo)) return false
+            val ctx = runCatching {
+                service.javaClass.getDeclaredField("n").apply { isAccessible = true }.get(service) as Context
+            }.getOrNull() ?: return false
+            return isEligibleForegroundContext(ctx)
+        }
+
+        fun isEligibleForegroundContext(ctx: Context): Boolean {
+            val activity = findActivity(ctx) ?: return false
+            if (activity.isFinishing || activity.isDestroyed) return false
+            if (!isActivityResumed(activity)) return false
+            if (hasResumedStoryFragment(activity)) return false
+            if (!isUgcDetailActivity(activity)) return false
+            return true
+        }
+
+        private fun findActivity(ctx: Context): Activity? {
+            var c: Context? = ctx
+            while (c != null) {
+                when (c) {
+                    is Activity -> return c
+                    is ContextWrapper -> c = c.baseContext
+                    else -> return null
+                }
+            }
+            return null
+        }
+
+        private fun isActivityResumed(activity: Activity): Boolean =
+            runCatching {
+                activity.javaClass.getMethod("isResumed").invoke(activity) as Boolean
+            }.getOrElse { true }
+
+        private fun isUgcDetailActivity(activity: Activity): Boolean {
+            val name = activity.javaClass.name
+            return name.contains("UnitedBizDetailsActivity") || name.contains("VideoDetailsActivity")
+        }
+
+        private fun hasResumedStoryFragment(activity: Activity): Boolean = runCatching {
+            val getFm = activity.javaClass.methods.firstOrNull {
+                it.name == "getSupportFragmentManager" && it.parameterCount == 0
+            } ?: return@runCatching false
+            val fm = getFm.invoke(activity) ?: return@runCatching false
+            val fragments = fm.javaClass.methods.firstOrNull { it.name == "getFragments" }
+                ?.invoke(fm) as? List<*> ?: return@runCatching false
+            fragments.any { frag ->
+                frag ?: return@any false
+                val resumed = frag.javaClass.methods.firstOrNull { it.name == "isResumed" }
+                    ?.invoke(frag) as? Boolean ?: false
+                resumed && frag.javaClass.name.contains("story", ignoreCase = true)
+            }
+        }.getOrDefault(false)
 
         fun cancelFallback() {
             fallbackRunnable?.let { mainHandler.removeCallbacks(it) }
@@ -344,7 +439,7 @@ class ForegroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoader) {
             }.getOrDefault(false)
         }
 
-        fun openNextRelate(classLoader: ClassLoader, service: Any) {
+        fun openNextRelate(classLoader: ClassLoader, service: Any, generation: Int = openGeneration) {
             cancelFallback()
             activating = false
             val ctx = runCatching {
@@ -357,7 +452,7 @@ class ForegroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoader) {
             }
             val preferPortrait = ForegroundAutoNextPrefs.resolvePreferPortrait(service)
             if (preferPortrait != null) {
-                openNextWithOrientationPick(classLoader, service, ctx, preferPortrait)
+                openNextWithOrientationPick(classLoader, service, ctx, preferPortrait, generation)
                 return
             }
             val avid = getCurrentAvid(service)
@@ -372,6 +467,16 @@ class ForegroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoader) {
                     .onFailure { Log.s("ForegroundAutoNext: relate feed failed: ${it.message}") }
                     .getOrNull()
                 mainHandler.post {
+                    if (generation != openGeneration) {
+                        Log.x("ForegroundAutoNext: stale relate feed open, cancelled")
+                        resumePendingCompletion(classLoader)
+                        return@post
+                    }
+                    if (!isEligibleForForegroundAutoNext(service)) {
+                        Log.x("ForegroundAutoNext: relate feed open skipped, not eligible")
+                        resumePendingCompletion(classLoader)
+                        return@post
+                    }
                     if (!uri.isNullOrBlank()) {
                         runCatching {
                             openUri(ctx, uri, fullscreen)
@@ -401,6 +506,7 @@ class ForegroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoader) {
             service: Any,
             ctx: Context,
             preferPortrait: Boolean,
+            generation: Int = openGeneration,
         ) {
             val currentAvid = getCurrentAvid(service)
             if (currentAvid == null || currentAvid <= 0L) {
@@ -416,6 +522,16 @@ class ForegroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoader) {
                 val aiAvids = collectAiAvids(service)
                 val picked = pickRelate(aiAvids, feed, preferPortrait)
                 mainHandler.post {
+                    if (generation != openGeneration) {
+                        Log.x("ForegroundAutoNext: stale oriented pick, cancelled")
+                        resumePendingCompletion(classLoader)
+                        return@post
+                    }
+                    if (!isEligibleForForegroundAutoNext(service)) {
+                        Log.x("ForegroundAutoNext: oriented pick skipped, not eligible")
+                        resumePendingCompletion(classLoader)
+                        return@post
+                    }
                     if (picked == null) {
                         Log.s("ForegroundAutoNext: oriented pick found nothing for avid=$currentAvid")
                         resumePendingCompletion(classLoader)
@@ -455,7 +571,14 @@ class ForegroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoader) {
             current?.javaClass?.getMethod("b")?.invoke(current) as? Long
         }.getOrNull()
 
-        private fun collectAiAvids(service: Any): List<Long> = runCatching {
+        private fun collectAiAvids(service: Any): List<Long> {
+            val raw = collectRawAiAvids(service)
+            if (raw.isEmpty()) return emptyList()
+            BlockChargingVideoHook.resolveAvidsSync(raw)
+            return raw.filter { !BlockChargingVideoHook.shouldBlockAvid(it) }
+        }
+
+        private fun collectRawAiAvids(service: Any): List<Long> = runCatching {
             val repo = service.javaClass.getDeclaredField("b")
                 .apply { isAccessible = true }.get(service)
             val size = repo.javaClass.getMethod("m").invoke(repo) as Int
@@ -468,6 +591,8 @@ class ForegroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoader) {
             }.filter { it > 0L }
         }.getOrDefault(emptyList())
 
+        private fun pickNextAiAvid(service: Any): Long? = collectAiAvids(service).firstOrNull()
+
         private fun pickRelate(
             aiAvidsInOrder: List<Long>,
             feed: List<RelateCandidate>,
@@ -476,18 +601,20 @@ class ForegroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoader) {
             val portraitByAvid = feed.associate { it.avid to it.portrait }
             val uriByAvid = feed.associate { it.avid to it.uri }
             for (avid in aiAvidsInOrder) {
+                if (BlockChargingVideoHook.shouldBlockAvid(avid)) continue
                 if (portraitByAvid[avid] == preferPortrait) {
                     return RelateCandidate(avid, uriByAvid[avid], preferPortrait)
                 }
             }
             for (candidate in feed) {
+                if (BlockChargingVideoHook.shouldBlockAvid(candidate.avid)) continue
                 if (candidate.portrait == preferPortrait) return candidate
             }
-            val fallbackAvid = aiAvidsInOrder.firstOrNull()
+            val fallbackAvid = aiAvidsInOrder.firstOrNull { !BlockChargingVideoHook.shouldBlockAvid(it) }
             if (fallbackAvid != null) {
                 return RelateCandidate(fallbackAvid, uriByAvid[fallbackAvid], portraitByAvid[fallbackAvid])
             }
-            return feed.firstOrNull()
+            return feed.firstOrNull { !BlockChargingVideoHook.shouldBlockAvid(it.avid) }
         }
 
         private fun requestRelateCandidates(classLoader: ClassLoader, avid: Long): List<RelateCandidate> {
@@ -503,21 +630,24 @@ class ForegroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoader) {
             }.getOrNull() ?: return emptyList()
             val reply = viewMossClass.getMethod("executeRelatesFeed", reqClass).invoke(moss, req)
                 ?: return emptyList()
-            return parseRelateCandidates(reply)
-        }
-
-        private fun parseRelateCandidates(reply: Any): List<RelateCandidate> {
             val relates = runCatching {
                 reply.javaClass.getMethod("getRelatesList").invoke(reply) as? List<*>
-            }.getOrNull() ?: return emptyList()
-            return relates.mapNotNull { card -> card?.let { parseRelateCard(it) } }
+            }.getOrNull().orEmpty()
+            BlockChargingVideoHook.resolveAvidsSync(
+                relates.mapNotNull { card -> card?.let { BlockChargingVideoHook.uniteCardAid(it) } },
+            )
+            return parseRelateCandidates(relates)
         }
+
+        private fun parseRelateCandidates(relates: List<*>): List<RelateCandidate> =
+            relates.mapNotNull { card -> card?.let { parseRelateCard(it) } }
 
         private fun parseRelateCard(card: Any): RelateCandidate? {
             val hasAv = runCatching {
                 card.javaClass.getMethod("hasAv").invoke(card) as Boolean
             }.getOrDefault(false)
             if (!hasAv) return null
+            if (BlockChargingVideoHook.shouldBlockUniteRelateCard(card)) return null
             val isPromo = runCatching {
                 card.javaClass.getMethod("hasCmStock").invoke(card) as Boolean
             }.getOrDefault(false)
@@ -526,6 +656,7 @@ class ForegroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoader) {
             val uri = basic.javaClass.getMethod("getUri").invoke(basic) as? String
             if (uri.isNullOrBlank()) return null
             val avid = avidFromUri(uri) ?: return null
+            if (BlockChargingVideoHook.shouldBlockAvid(avid)) return null
             val portrait = runCatching {
                 val av = card.javaClass.getMethod("getAv").invoke(card) ?: return@runCatching null
                 if (av.javaClass.getMethod("hasDimension").invoke(av) as Boolean) {

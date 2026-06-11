@@ -8,6 +8,7 @@ import org.json.JSONObject
 import java.lang.reflect.Field
 import java.net.HttpURLConnection
 import java.net.URL
+import java.util.ArrayList
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
@@ -51,6 +52,7 @@ class BlockChargingVideoHook(classLoader: ClassLoader) : BaseHook(classLoader) {
 
     override fun startHook() {
         if (!blockCharging && !blockPromoted) return
+        configure(blockCharging, blockChargingNet, blockPromoted)
         Log.s("startHook: BlockChargingVideo charging=$blockCharging promoted=$blockPromoted")
 
         // 相关视频/连播两处都要过滤充电或运营推广位，只要任一开关开启就挂钩。
@@ -61,7 +63,37 @@ class BlockChargingVideoHook(classLoader: ClassLoader) : BaseHook(classLoader) {
             hookStoryFeed()
             hookHomeFeed()
             hookPlayViewCharging()
+            hookAiEpisodeList()
         }
+    }
+
+    /** Strip known charging avids from the background/foreground AI auto-play episode list. */
+    private fun hookAiEpisodeList() {
+        val repoClass =
+            "com.bilibili.ship.theseus.united.page.background.PageBackgroundPlayRepository"
+                .findClassOrNull(mClassLoader) ?: return
+        val anchorMethod = repoClass.declaredMethods.firstOrNull { method ->
+            method.parameterCount == 2 &&
+                List::class.java.isAssignableFrom(method.parameterTypes[1])
+        } ?: return
+        anchorMethod.hookMethod { chain ->
+            @Suppress("UNCHECKED_CAST")
+            val episodes = chain.args.getOrNull(1) as? List<Any> ?: return@hookMethod chain.proceed()
+            val avids = episodes.mapNotNull { episode ->
+                (episode.javaClass.getMethod("a").invoke(episode) as? Long)?.takeIf { it > 0L }
+            }
+            resolveAvidsSync(avids)
+            val filtered = episodes.filter { episode ->
+                val avid = (episode.javaClass.getMethod("a").invoke(episode) as? Long) ?: 0L
+                !shouldBlockAvid(avid)
+            }
+            if (filtered.size < episodes.size) {
+                Log.d("BlockChargingVideo: AI episode list removed ${episodes.size - filtered.size} charging item(s)")
+                chain.args[1] = ArrayList(filtered)
+            }
+            chain.proceed()
+        }
+        Log.d("BlockChargingVideo: hooked AI episode list on ${repoClass.name}.${anchorMethod.name}")
     }
 
     // region 竖屏视频流
@@ -107,20 +139,7 @@ class BlockChargingVideoHook(classLoader: ClassLoader) : BaseHook(classLoader) {
         if (removed > 0) Log.d("BlockChargingVideo: removed $removed story item(s)")
     }
 
-    private fun isChargingStory(item: Any): Boolean {
-        val upowerInfo = item.callMethodOrNull("getUpowerInfo")
-        val charging = upowerInfo != null
-        if (charging) {
-            // 竖屏流能结构化识别充电，顺手把 aid 记进缓存，供相关列表/推荐按 aid 拦截。
-            val aid = (item.callMethodOrNull("getAid") as? Long) ?: 0L
-            if (rememberChargingAid(aid)) {
-                Log.d("BlockChargingVideo: cached charging aid=$aid (story upowerInfo)")
-            } else if (logEnabled) {
-                Log.d("ChargingStory upowerInfo present on ${item.javaClass.simpleName} aid=$aid")
-            }
-        }
-        return charging
-    }
+    private fun isChargingStory(item: Any): Boolean = isChargingStoryItem(item)
     // endregion
 
     // region view.v1 相关视频 / 连播
@@ -257,54 +276,7 @@ class BlockChargingVideoHook(classLoader: ClassLoader) : BaseHook(classLoader) {
         }
     }
 
-    private fun isChargingRelateUnite(card: Any): Boolean {
-        val basicInfo = if (card.callMethodOrNull("hasBasicInfo") == true) {
-            card.callMethodOrNull("getBasicInfo")
-        } else null
-        val title = basicInfo?.callMethodOrNullAs<String>("getTitle").orEmpty()
-        val reportFlowData = basicInfo?.callMethodOrNullAs<String>("getReportFlowData").orEmpty()
-        // viewunite 的 RelateAVCard / CardBasicInfo 没有任何结构化充电字段（已对照 proto 与
-        // 完整字段日志确认）。首见兜底：标题含“充电专属”，或 report_flow_data 里
-        // flow_source=chg_plt_up（充电 UP 推广位渠道）。普通卡片 flow_source 为
-        // recent_off/swing/merge_* 等，不会误杀。
-        val viaChargingChannel = reportFlowData.contains(CHARGE_FLOW_SOURCE)
-        val viaTitle = title.contains(CHARGE_EXCLUSIVE_KEYWORD)
-        // 主力判据：该 aid 之前被打开过且确认是充电视频（见 recordMainVideoCharging）。
-        // AV 卡片的 basic_info.id 即 aid。
-        val aid = (basicInfo?.callMethodOrNull("getId") as? Long) ?: 0L
-        val viaKnownAid = aid > 0L && knownChargingAids.contains(aid)
-        if (logEnabled) {
-            val coverRightText = basicInfo?.callMethodOrNullAs<String>("getCoverRightText").orEmpty()
-            val uri = basicInfo?.callMethodOrNullAs<String>("getUri").orEmpty()
-            Log.d(
-                "ChargingRelateUnite cardCase=${card.callMethodOrNull("getCardCase")} aid=$aid " +
-                    "title=$title chgChannel=$viaChargingChannel knownAid=$viaKnownAid " +
-                    "flowData=$reportFlowData coverRightText=$coverRightText uri=$uri",
-            )
-        }
-        return viaChargingChannel || viaTitle || viaKnownAid
-    }
-
-    private fun shouldRemoveRelateUnite(card: Any): Boolean =
-        (blockCharging && isChargingRelateUnite(card)) ||
-            (blockPromoted && isPromotedRelateUnite(card))
-
-    /**
-     * 运营推广位（购买的“热搜/定向”推送），实测整张相关视频列表里此类卡片的
-     * basic_info.from == "operation"（普通卡片该字段为空，from_source_type 也为 0）。
-     */
-    private fun isPromotedRelateUnite(card: Any): Boolean {
-        val from = if (card.callMethodOrNull("hasBasicInfo") == true) {
-            card.callMethodOrNull("getBasicInfo")?.callMethodOrNullAs<String>("getFrom").orEmpty()
-        } else ""
-        val promoted = from == PROMOTED_FROM
-        if (logEnabled && promoted) {
-            Log.d(
-                "PromotedRelateUnite removed cardCase=${card.callMethodOrNull("getCardCase")} from=$from",
-            )
-        }
-        return promoted
-    }
+    private fun shouldRemoveRelateUnite(card: Any): Boolean = shouldBlockUniteRelateCard(card)
     // endregion
 
     // region 充电播放确认（按播放/试看结果回填缓存）
@@ -375,20 +347,11 @@ class BlockChargingVideoHook(classLoader: ClassLoader) : BaseHook(classLoader) {
      * 同一 aid 只查一次，后续秒过。仅在 blockCharging + blockChargingNet 同时开启时生效。
      */
     private fun prefetchUniteCharging(cards: List<Any>) {
-        if (!blockCharging || !blockChargingNet) return
-        resolveChargingAids(cards.mapNotNull(::uniteCardAid))
+        resolveAvidsSync(cards.mapNotNull { uniteCardAid(it) })
     }
 
     private fun prefetchV1Charging(cards: List<Any>) {
-        if (!blockCharging || !blockChargingNet) return
-        resolveChargingAids(cards.mapNotNull(::v1CardAid))
-    }
-
-    private fun uniteCardAid(card: Any): Long? {
-        if (card.callMethodOrNull("getCardCase")?.toString() != "AV") return null
-        if (card.callMethodOrNull("hasBasicInfo") != true) return null
-        return (card.callMethodOrNull("getBasicInfo")?.callMethodOrNull("getId") as? Long)
-            ?.takeIf { it > 0L }
+        resolveAvidsSync(cards.mapNotNull { v1CardAid(it) })
     }
 
     private fun v1CardAid(card: Any): Long? {
@@ -396,63 +359,6 @@ class BlockChargingVideoHook(classLoader: ClassLoader) : BaseHook(classLoader) {
         return (card.callMethodOrNull("getAid") as? Long)?.takeIf { it > 0L }
     }
 
-    /** 批量解析：过滤已知 aid，整页并发查询，命中充电写黑名单、否则写会话白名单。 */
-    private fun resolveChargingAids(aids: List<Long>) {
-        val todo = aids.asSequence()
-            .filter { it > 0L && it !in knownChargingAids && it !in knownNonChargingAids }
-            .distinct()
-            .toList()
-        if (todo.isEmpty()) return
-        // 整页一次性提交到常驻线程池：连接复用(keep-alive)+足够并发，单页基本一轮打完。
-        val futures = todo.map { aid ->
-            netPool.submit {
-                when (queryIsUpowerExclusive(aid)) {
-                    true -> {
-                        if (rememberChargingAid(aid)) {
-                            Log.d("BlockChargingVideo: cached charging aid=$aid (view api)")
-                        }
-                    }
-                    false -> knownNonChargingAids.add(aid)
-                    null -> {} // 查询失败/风控：不缓存，下次仍可重试，绝不误删
-                }
-            }
-        }
-        val deadline = System.currentTimeMillis() + NET_TOTAL_BUDGET_MS
-        for (f in futures) {
-            val remaining = deadline - System.currentTimeMillis()
-            if (remaining <= 0L) {
-                f.cancel(true)
-                continue
-            }
-            runCatchingOrNull { f.get(remaining, TimeUnit.MILLISECONDS) } ?: f.cancel(true)
-        }
-    }
-
-    /** 调 view 接口读取 is_upower_exclusive；返回 null 表示请求失败或被风控，不可信。 */
-    private fun queryIsUpowerExclusive(aid: Long): Boolean? {
-        val body = runCatchingOrNull {
-            val conn = (URL("$VIEW_API$aid").openConnection() as HttpURLConnection).apply {
-                connectTimeout = NET_CONN_TIMEOUT_MS
-                readTimeout = NET_READ_TIMEOUT_MS
-                requestMethod = "GET"
-                setRequestProperty("User-Agent", NET_UA)
-                setRequestProperty("Referer", "https://www.bilibili.com")
-                // 不调用 disconnect()，让底层 socket 进连接池，后续请求免去 TLS 握手。
-                setRequestProperty("Connection", "keep-alive")
-            }
-            if (conn.responseCode != 200) {
-                // 读干 errorStream 才能让该连接回到池里复用。
-                runCatchingOrNull { conn.errorStream?.use { it.readBytes() } }
-                return@runCatchingOrNull null
-            }
-            conn.inputStream.bufferedReader().use { it.readText() }
-        } ?: return null
-        return runCatchingOrNull {
-            val json = JSONObject(body)
-            if (json.optInt("code", -1) != 0) return null
-            json.optJSONObject("data")?.optBoolean("is_upower_exclusive", false)
-        }
-    }
     // endregion
 
     // region 首页推荐
@@ -467,7 +373,7 @@ class BlockChargingVideoHook(classLoader: ClassLoader) : BaseHook(classLoader) {
                 val data = result.getObjectFieldOrNull("data") ?: return@runCatchingOrNull
                 @Suppress("UNCHECKED_CAST")
                 val items = data.getJsonField("items") as? MutableList<Any> ?: return@runCatchingOrNull
-                if (blockChargingNet) resolveChargingAids(items.mapNotNull(::feedCardAid))
+                resolveAvidsSync(items.mapNotNull(::feedCardAid))
                 val removed = items.size
                 items.removeAll { isChargingFeedItem(it) }
                 val diff = removed - items.size
@@ -604,6 +510,136 @@ class BlockChargingVideoHook(classLoader: ClassLoader) : BaseHook(classLoader) {
     // endregion
 
     companion object {
+        @Volatile
+        var blockChargingEnabled = false
+
+        @Volatile
+        var blockChargingNetEnabled = false
+
+        @Volatile
+        var blockPromotedEnabled = false
+
+        fun configure(blockCharging: Boolean, blockNet: Boolean, blockPromoted: Boolean) {
+            blockChargingEnabled = blockCharging
+            blockChargingNetEnabled = blockCharging && blockNet
+            blockPromotedEnabled = blockPromoted
+        }
+
+        fun shouldBlockAvid(aid: Long): Boolean =
+            blockChargingEnabled && aid > 0L && aid in knownChargingAids
+
+        fun isChargingStoryItem(item: Any): Boolean {
+            if (!blockChargingEnabled) return false
+            val upowerInfo = item.callMethodOrNull("getUpowerInfo")
+            if (upowerInfo != null) {
+                val aid = (item.callMethodOrNull("getAid") as? Long) ?: 0L
+                if (aid > 0L) rememberChargingAid(aid)
+                return true
+            }
+            val aid = (item.callMethodOrNull("getAid") as? Long) ?: 0L
+            return aid > 0L && aid in knownChargingAids
+        }
+
+        fun filterStoryFeedItems(items: List<*>): List<Any> {
+            if (!blockChargingEnabled) return items.filterNotNull()
+            val filtered = items.filterNotNull().filter { !isChargingStoryItem(it) }
+            val removed = items.size - filtered.size
+            if (removed > 0) Log.d("BlockChargingVideo: story auto-next removed $removed charging item(s)")
+            return filtered
+        }
+
+        fun shouldBlockUniteRelateCard(card: Any): Boolean {
+            if (blockPromotedEnabled && isPromotedUniteCard(card)) return true
+            if (!blockChargingEnabled) return false
+            return isChargingUniteCard(card) || shouldBlockAvid(uniteCardAid(card) ?: 0L)
+        }
+
+        fun resolveAvidsSync(aids: List<Long>, budgetMs: Long = NET_TOTAL_BUDGET_MS) {
+            if (!blockChargingEnabled || !blockChargingNetEnabled) return
+            resolveChargingAids(aids, budgetMs)
+        }
+
+        fun uniteCardAid(card: Any): Long? {
+            if (card.callMethodOrNull("getCardCase")?.toString() != "AV") return null
+            if (card.callMethodOrNull("hasBasicInfo") != true) return null
+            return (card.callMethodOrNull("getBasicInfo")?.callMethodOrNull("getId") as? Long)
+                ?.takeIf { it > 0L }
+        }
+
+        private fun isChargingUniteCard(card: Any): Boolean {
+            val basicInfo = if (card.callMethodOrNull("hasBasicInfo") == true) {
+                card.callMethodOrNull("getBasicInfo")
+            } else null
+            val title = basicInfo?.callMethodOrNullAs<String>("getTitle").orEmpty()
+            val reportFlowData = basicInfo?.callMethodOrNullAs<String>("getReportFlowData").orEmpty()
+            val viaChargingChannel = reportFlowData.contains(CHARGE_FLOW_SOURCE)
+            val viaTitle = title.contains(CHARGE_EXCLUSIVE_KEYWORD)
+            val aid = (basicInfo?.callMethodOrNull("getId") as? Long) ?: 0L
+            return viaChargingChannel || viaTitle || (aid > 0L && aid in knownChargingAids)
+        }
+
+        private fun isPromotedUniteCard(card: Any): Boolean {
+            val from = if (card.callMethodOrNull("hasBasicInfo") == true) {
+                card.callMethodOrNull("getBasicInfo")?.callMethodOrNullAs<String>("getFrom").orEmpty()
+            } else ""
+            return from == PROMOTED_FROM
+        }
+
+        /** 批量解析：过滤已知 aid，整页并发查询，命中充电写黑名单、否则写会话白名单。 */
+        private fun resolveChargingAids(aids: List<Long>, budgetMs: Long) {
+            val todo = aids.asSequence()
+                .filter { it > 0L && it !in knownChargingAids && it !in knownNonChargingAids }
+                .distinct()
+                .toList()
+            if (todo.isEmpty()) return
+            val futures = todo.map { aid ->
+                netPool.submit {
+                    when (queryIsUpowerExclusive(aid)) {
+                        true -> {
+                            if (rememberChargingAid(aid)) {
+                                Log.d("BlockChargingVideo: cached charging aid=$aid (view api)")
+                            }
+                        }
+                        false -> knownNonChargingAids.add(aid)
+                        null -> {}
+                    }
+                }
+            }
+            val deadline = System.currentTimeMillis() + budgetMs
+            for (f in futures) {
+                val remaining = deadline - System.currentTimeMillis()
+                if (remaining <= 0L) {
+                    f.cancel(true)
+                    continue
+                }
+                runCatchingOrNull { f.get(remaining, TimeUnit.MILLISECONDS) } ?: f.cancel(true)
+            }
+        }
+
+        /** 调 view 接口读取 is_upower_exclusive；返回 null 表示请求失败或被风控，不可信。 */
+        private fun queryIsUpowerExclusive(aid: Long): Boolean? {
+            val body = runCatchingOrNull {
+                val conn = (URL("$VIEW_API$aid").openConnection() as HttpURLConnection).apply {
+                    connectTimeout = NET_CONN_TIMEOUT_MS
+                    readTimeout = NET_READ_TIMEOUT_MS
+                    requestMethod = "GET"
+                    setRequestProperty("User-Agent", NET_UA)
+                    setRequestProperty("Referer", "https://www.bilibili.com")
+                    setRequestProperty("Connection", "keep-alive")
+                }
+                if (conn.responseCode != 200) {
+                    runCatchingOrNull { conn.errorStream?.use { it.readBytes() } }
+                    return@runCatchingOrNull null
+                }
+                conn.inputStream.bufferedReader().use { it.readText() }
+            } ?: return null
+            return runCatchingOrNull {
+                val json = JSONObject(body)
+                if (json.optInt("code", -1) != 0) return null
+                json.optJSONObject("data")?.optBoolean("is_upower_exclusive", false)
+            }
+        }
+
         private const val CHARGE_KEYWORD = "充电"
         private const val CHARGE_EXCLUSIVE_KEYWORD = "充电专属"
         private const val CHARGE_FLOW_SOURCE = "chg_plt_up"

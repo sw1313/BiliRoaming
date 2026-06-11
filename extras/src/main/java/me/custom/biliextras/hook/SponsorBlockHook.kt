@@ -24,10 +24,19 @@ class SponsorBlockHook(classLoader: ClassLoader) : BaseHook(classLoader) {
     private companion object {
         const val POLL_INTERVAL_MS = 1000L
         const val SKIP_LOOKAHEAD_MS = 1000L
-        const val SKIP_TARGET_PADDING_MS = 0
+        const val SKIP_TARGET_PADDING_MS = 200
         const val FETCH_RETRY_DELAY_MS = 3000L
         const val PLAYER_CORE_STARTUP_PREWARM_DELAY_MS = 3000L
         const val PLAYER_CORE_PLAYVIEW_PREWARM_DELAY_MS = 300L
+        /** Min gap between any two skip seeks (progress observer can fire very often). */
+        const val MIN_SKIP_INTERVAL_MS = 1800L
+        /** Per-segment cooldown so a short intro/outro cannot re-trigger while position settles. */
+        const val SEGMENT_SKIP_COOLDOWN_MS = 8000L
+        const val TAIL_SEGMENT_COOLDOWN_MS = 12_000L
+        const val CLEAR_PAST_TOLERANCE_MS = 350L
+        const val TAIL_SEGMENT_MARGIN_MS = 2000L
+        const val START_SEGMENT_MARGIN_MS = 1500L
+        const val SHORT_SEGMENT_EXTRA_PAD_MS = 700L
     }
 
     private data class VideoKey(
@@ -48,6 +57,8 @@ class SponsorBlockHook(classLoader: ClassLoader) : BaseHook(classLoader) {
     private var polling = false
     private var fetchingKey: VideoKey? = null
     private var allowInsideSegmentOnce = false
+    private var lastSkipAtMs = 0L
+    private val skippedSegmentUntilMs = ConcurrentHashMap<String, Long>()
     private var playerCoreHooked = false
     private var progressObserver: Any? = null
     private var progressObserverService: Any? = null
@@ -205,7 +216,7 @@ class SponsorBlockHook(classLoader: ClassLoader) : BaseHook(classLoader) {
     private fun updatePlayerService(service: Any, checkNow: Boolean) {
         val previousService = playerCoreService
         if (previousService != null && previousService !== service) {
-            lastCheckedSecond = null
+            resetSkipThrottle()
             SponsorBlockState.invalidatePosition()
         }
         playerCoreService = service
@@ -335,7 +346,7 @@ class SponsorBlockHook(classLoader: ClassLoader) : BaseHook(classLoader) {
         val current = currentVideo
         if (current != null && current.bvid == bvid && (cid <= 0L || current.cid == cid)) return
         currentSegments = emptyList()
-        lastCheckedSecond = null
+        resetSkipThrottle()
         val pendingVideo = VideoKey(bvid, cid.coerceAtLeast(0L))
         SponsorBlockState.reset(pendingVideo.toStateVideo())
     }
@@ -380,9 +391,16 @@ class SponsorBlockHook(classLoader: ClassLoader) : BaseHook(classLoader) {
         }
         currentVideo = video
         currentSegments = emptyList()
-        lastCheckedSecond = null
+        resetSkipThrottle()
         SponsorBlockState.reset(video.toStateVideo())
         fetchSegments(video)
+    }
+
+    private fun resetSkipThrottle() {
+        lastCheckedSecond = null
+        lastSkipAtMs = 0L
+        skippedSegmentUntilMs.clear()
+        allowInsideSegmentOnce = false
     }
 
     private fun fetchSegments(video: VideoKey) {
@@ -446,6 +464,8 @@ class SponsorBlockHook(classLoader: ClassLoader) : BaseHook(classLoader) {
         if (currentSegments.isNotEmpty()) {
             SponsorBlockState.updatePlaybackPosition(positionMs)
         }
+        val now = System.currentTimeMillis()
+        if (now - lastSkipAtMs < MIN_SKIP_INTERVAL_MS) return
         val positionSecond = positionMs / 1000L
         if (lastCheckedSecond == positionSecond) return
         lastCheckedSecond = positionSecond
@@ -456,31 +476,69 @@ class SponsorBlockHook(classLoader: ClassLoader) : BaseHook(classLoader) {
             }
             val startMs = (it.start * 1000).toLong()
             val endMs = (it.end * 1000).toLong()
+            if (positionMs >= endMs - CLEAR_PAST_TOLERANCE_MS) return@firstOrNull false
+            val key = it.uuid.ifBlank { "${it.category}:${it.start}:${it.end}" }
+            if ((skippedSegmentUntilMs[key] ?: 0L) > now) return@firstOrNull false
             (positionMs <= startMs && startMs <= positionMs + SKIP_LOOKAHEAD_MS) ||
                 (allowInsideSegmentOnce && positionMs in startMs until endMs)
         } ?: return
         val key = segment.uuid.ifBlank { "${segment.category}:${segment.start}:${segment.end}" }
         allowInsideSegmentOnce = false
         val service = playerCoreService ?: return
+        val startMs = (segment.start * 1000).toLong()
+        val endMs = (segment.end * 1000).toLong()
+        val resolvedDuration = durationMs?.takeIf { it > 0L } ?: positionSnapshot(service).let { positions ->
+            (positions["getRealDuration"] ?: positions["getDuration"])?.takeIf { it > 0L }
+        }
         Log.x(
             "SponsorBlock: hit segment key=$key, position=${positionMs}ms, " +
-                "target=${(segment.end * 1000).toInt()}ms, service=${service.javaClass.name}#${System.identityHashCode(service)}",
+                "range=${startMs}-${endMs}ms, service=${service.javaClass.name}#${System.identityHashCode(service)}",
         )
-        seekTo(service, segment, durationMs)
+        lastSkipAtMs = now
+        skippedSegmentUntilMs[key] = now + cooldownForSegment(segment, resolvedDuration)
+        seekTo(service, segment, resolvedDuration)
+    }
+
+    private fun cooldownForSegment(segment: SponsorSegment, durationMs: Long?): Long {
+        val endMs = (segment.end * 1000).toLong()
+        val isTail = durationMs != null && durationMs > 0L && endMs >= durationMs - TAIL_SEGMENT_MARGIN_MS
+        return if (isTail) TAIL_SEGMENT_COOLDOWN_MS else SEGMENT_SKIP_COOLDOWN_MS
     }
 
     private fun seekTo(service: Any, segment: SponsorSegment, knownDurationMs: Long? = null) {
         val methods = instance.playerCoreMethods ?: return
-        val requestedTargetMs = (segment.end * 1000).toInt() + SKIP_TARGET_PADDING_MS
-        val durationMs = knownDurationMs ?: positionSnapshot(service).let { positions -> positions["getRealDuration"] ?: positions["getDuration"] }
-            ?.takeIf { it > 0L }
-        val targetMs = durationMs
-            ?.let { duration -> requestedTargetMs.coerceAtMost((duration - 500L).coerceAtLeast(0L).toInt()) }
-            ?: requestedTargetMs
+        val startMs = (segment.start * 1000).toLong()
+        val endMs = (segment.end * 1000).toLong()
+        val segmentLenMs = (endMs - startMs).coerceAtLeast(0L)
+        val durationMs = knownDurationMs ?: positionSnapshot(service).let { positions ->
+            positions["getRealDuration"] ?: positions["getDuration"]
+        }?.takeIf { it > 0L }
         val beforeMs = readPositionMs(service, methods)
+        if (beforeMs != null && beforeMs >= endMs - CLEAR_PAST_TOLERANCE_MS) return
+        val isTail = durationMs != null && endMs >= durationMs - TAIL_SEGMENT_MARGIN_MS
+        if (isTail && durationMs != null && beforeMs != null && beforeMs >= durationMs - 1200L) {
+            return
+        }
+        val extraPad = when {
+            startMs <= START_SEGMENT_MARGIN_MS && segmentLenMs < 3000L -> SHORT_SEGMENT_EXTRA_PAD_MS
+            segmentLenMs < 2000L -> SHORT_SEGMENT_EXTRA_PAD_MS / 2
+            else -> SKIP_TARGET_PADDING_MS
+        }
+        var targetMs = (endMs + extraPad.toLong()).toInt()
+        if (durationMs != null) {
+            val maxTarget = (durationMs - 200L).coerceAtLeast(endMs).toInt()
+            targetMs = targetMs.coerceAtMost(maxTarget)
+            if (isTail) {
+                targetMs = maxTarget
+            }
+        }
+        if (beforeMs != null) {
+            targetMs = targetMs.coerceAtLeast((beforeMs + 200L).toInt())
+        }
+        if (beforeMs != null && targetMs <= beforeMs + 150) return
         invokeSeek(methods.seekTo, service, targetMs, false).onSuccess {
             SponsorBlockPrefs.addStats(((targetMs.toLong() - (beforeMs ?: targetMs.toLong())) / 1000L).coerceAtLeast(0L))
-            verifySeek(service, targetMs)
+            verifySeek(service, targetMs, segment, durationMs)
             if (SponsorBlockPrefs.showToast) {
                 Log.toast("空降：${SponsorBlockCategory.titleOf(segment.category)}")
             }
@@ -527,8 +585,10 @@ class SponsorBlockHook(classLoader: ClassLoader) : BaseHook(classLoader) {
             ?: positions["getCurrentPosition"]
     }
 
-    private fun verifySeek(service: Any, targetMs: Int) {
+    private fun verifySeek(service: Any, targetMs: Int, segment: SponsorSegment, durationMs: Long?) {
         val methods = instance.playerCoreMethods ?: return
+        val endMs = (segment.end * 1000).toLong()
+        if (durationMs != null && endMs >= durationMs - TAIL_SEGMENT_MARGIN_MS) return
         handler.postDelayed({
             val afterMs = readPositionMs(service, methods)
             if (afterMs != null && kotlin.math.abs(afterMs - targetMs) > 3000 && methods.seekTo.parameterCount == 2) {

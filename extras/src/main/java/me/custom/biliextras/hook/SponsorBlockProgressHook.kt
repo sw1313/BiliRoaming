@@ -2,7 +2,9 @@ package me.custom.biliextras.hook
 
 import android.graphics.Canvas
 import android.graphics.Paint
+import android.view.ViewParent
 import android.widget.ProgressBar
+import android.widget.SeekBar
 import me.custom.biliextras.sponsorblock.SponsorBlockPrefs
 import me.custom.biliextras.sponsorblock.SponsorBlockState
 import me.custom.biliextras.utils.Log
@@ -14,9 +16,17 @@ class SponsorBlockProgressHook(classLoader: ClassLoader) : BaseHook(classLoader)
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val loggedClasses = Collections.newSetFromMap(WeakHashMap<Class<*>, Boolean>())
 
+    /** Official player timeline widgets only; volume/brightness sliders also extend SeekBar/ProgressBar. */
+    private val videoSeekMarkers = listOf(
+        "PlayerSeekWidget",
+        "HighEnergySeekWidget",
+        "StorySeekBar",
+        "playerbizcommonv2.widget.seek",
+    )
+
     override fun startHook() {
-        // 空降未开启时进度条永远不会显示分段，没必要给全 App 的 ProgressBar.onDraw 都挂钩。
-        if (!SponsorBlockPrefs.enabled) return
+        // 未开启空降或未开启「显示进度条片段」时不必挂钩全 App 的 ProgressBar.onDraw。
+        if (!SponsorBlockPrefs.enabled || !SponsorBlockPrefs.showProgress) return
         ProgressBar::class.java.hookMethod("onDraw", Canvas::class.java) { chain ->
             val result = chain.proceed()
             if (SponsorBlockState.showProgress && SponsorBlockState.hasSegments) {
@@ -61,12 +71,39 @@ class SponsorBlockProgressHook(classLoader: ClassLoader) : BaseHook(classLoader)
 
     private fun isLikelyVideoProgress(progressBar: ProgressBar): Boolean {
         if (progressBar.max <= 0) return false
+        val cls = progressBar.javaClass.name
+        if (progressBar is SeekBar) {
+            // Whitelist first: Story 竖屏/横屏都用 StorySeekBar，不受细条启发式影响。
+            if (videoSeekMarkers.any { cls.contains(it) }) return true
+            if (isVolumeOrBrightnessBar(progressBar)) return false
+            return false
+        }
+        if (isVolumeOrBrightnessBar(progressBar)) return false
         val width = progressBar.width
         val height = progressBar.height
         if (width < height * 6) return false
-        val name = progressBar.javaClass.name.lowercase()
+        val name = cls.lowercase()
         if (name.contains("loading") || name.contains("refresh")) return false
         return progressBar.progress >= 0
+    }
+
+    private fun isVolumeOrBrightnessBar(progressBar: ProgressBar): Boolean {
+        var parent: ViewParent? = progressBar.parent
+        var depth = 0
+        while (parent != null && depth < 10) {
+            val name = parent.javaClass.name
+            if (name.contains("playerbizcommon.gesture") ||
+                name.contains("BrightnessAndVolume") ||
+                name.contains("BrightnessVolume")
+            ) {
+                return true
+            }
+            parent = parent.parent
+            depth++
+        }
+        // Volume overlay uses a very thin seek bar (~2dp); player timeline is much taller.
+        if (progressBar.height in 1..progressBar.dp(6)) return true
+        return false
     }
 
     private fun matchesCurrentPlayback(progressBar: ProgressBar, durationMs: Long): Boolean {
