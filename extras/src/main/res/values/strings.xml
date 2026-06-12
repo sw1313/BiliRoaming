@@ -20,7 +20,7 @@
     <string name="block_story_ad_title">屏蔽竖屏模式广告视频</string>
     <string name="block_story_ad_summary">屏蔽 Story 竖屏流中的广告视频卡片（含「应用 / 点击直达」等效果广告，整条不再刷出）。注意：部分广告视频只是广告商买了推荐位的正常内容，整条屏蔽可能误伤，推荐不开</string>
     <string name="story_diversion_settings_title">屏蔽竖屏导流入口选项</string>
-    <string name="story_diversion_settings_summary">分项屏蔽竖屏流的导流入口与浮层：左下角「导流入口」标签（购物·视频同款 / 游戏 / 番剧 / 大会员 / 广告）、购物车浮层、「应用·点击直达」广告浮层，按需勾选</string>
+    <string name="story_diversion_settings_summary">分项屏蔽竖屏流的导流入口与浮层：左下角标签、番剧上方大会员条、直播预约、非 WiFi 流量卡推广、购物车与广告浮层等，按需勾选</string>
     <string name="story_background_auto_next_title">竖屏后台自动连播</string>
     <string name="story_background_auto_next_summary">竖屏视频后台或息屏播放结束后，自动切到下一个视频</string>
     <string name="foreground_auto_next_title">前台播放自动播放相关视频</string>

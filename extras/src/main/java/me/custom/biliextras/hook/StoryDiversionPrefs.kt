@@ -31,7 +31,12 @@ object StoryDiversionPrefs {
     val gotoEntries = listOf(
         Entry("block_diversion_cart", "购物 / 视频同款 / 立即购买", "购物", setOf("cart", "anchor_nature")),
         Entry("block_diversion_game", "游戏推广入口", "游戏", setOf("game")),
-        Entry("block_diversion_vip", "大会员推广入口", "大会员", setOf("vip")),
+        Entry(
+            "block_diversion_vip",
+            "大会员推广（左下角标签 + 番剧上方推广条）",
+            "大会员",
+            setOf("vip"),
+        ),
         Entry("block_diversion_ad", "广告推广入口", "广告", setOf("ad", "anchor_ad")),
         Entry("block_diversion_topic", "话题入口", "话题", setOf("topic_new", "topic")),
         Entry("block_diversion_music", "音乐入口", "音乐", setOf("music_new", "music")),
@@ -58,13 +63,22 @@ object StoryDiversionPrefs {
         Entry(KEY_CHARGE_ENTRY, "充电专属入口", "充电", setOf("充电")),
     )
 
+    const val KEY_LIVE_RESERVATION = "block_story_live_reservation"
+    const val KEY_FREE_DATA = "block_story_free_data"
+
     val overlayEntries = listOf(
         Entry(KEY_SHOPCART, "购物车浮层", "购物车浮层"),
         Entry(KEY_AD_OVERLAY, "应用 · 点击直达广告浮层", "广告浮层"),
     )
 
+    /** Standalone story widgets outside the bottom-left diversion chip. */
+    val widgetEntries = listOf(
+        Entry(KEY_LIVE_RESERVATION, "直播预约条", "直播预约"),
+        Entry(KEY_FREE_DATA, "流量卡 / 免流推广（非 WiFi）", "流量卡"),
+    )
+
     /** All items, in display order, for the settings dialog. */
-    val allEntries = gotoEntries + ogvSeasonEntries + textEntries + overlayEntries
+    val allEntries = gotoEntries + ogvSeasonEntries + textEntries + overlayEntries + widgetEntries
 
     fun isBlocked(key: String): Boolean = ePrefs.getBoolean(key, false)
 
@@ -75,6 +89,13 @@ object StoryDiversionPrefs {
     fun shopCartBlocked(): Boolean = isBlocked(KEY_SHOPCART)
 
     fun adOverlayBlocked(): Boolean = isBlocked(KEY_AD_OVERLAY)
+
+    /** StoryOgvVipBarWidget — the "大会员 | 月均仅9.8元" bar above OGV titles. */
+    fun ogvVipBarBlocked(): Boolean = isBlocked("block_diversion_vip")
+
+    fun liveReservationBlocked(): Boolean = isBlocked(KEY_LIVE_RESERVATION)
+
+    fun freeDataBlocked(): Boolean = isBlocked(KEY_FREE_DATA)
 
     /**
      * Category keyword sets for the enabled 番剧/电影 ogv-season toggles (matched against

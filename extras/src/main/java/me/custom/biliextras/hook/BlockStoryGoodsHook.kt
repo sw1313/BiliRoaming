@@ -1,6 +1,8 @@
 package me.custom.biliextras.hook
 
 import android.view.View
+import android.view.ViewGroup
+import io.github.libxposed.api.XposedInterface
 import me.custom.biliextras.utils.*
 
 class BlockStoryGoodsHook(classLoader: ClassLoader) : BaseHook(classLoader) {
@@ -10,16 +12,30 @@ class BlockStoryGoodsHook(classLoader: ClassLoader) : BaseHook(classLoader) {
         val adOverlay = StoryDiversionPrefs.adOverlayBlocked()
         val ogvCategories = StoryDiversionPrefs.blockedOgvCategories()
         val textLabels = StoryDiversionPrefs.blockedTextLabels()
-        if (blockedGotos.isEmpty() && !shopCart && !adOverlay && textLabels.isEmpty()) return
+        val ogvVipBar = StoryDiversionPrefs.ogvVipBarBlocked()
+        val liveReservation = StoryDiversionPrefs.liveReservationBlocked()
+        val freeData = StoryDiversionPrefs.freeDataBlocked()
+        if (blockedGotos.isEmpty() && !shopCart && !adOverlay && textLabels.isEmpty() &&
+            !ogvVipBar && !liveReservation && !freeData
+        ) {
+            return
+        }
 
         val ogvKeywords = ogvCategories.flatten().toSet()
         if (shopCart) blockShopCartWidget()
         if (adOverlay) blockStoryAdWidget()
+        if (ogvVipBar) blockStoryOgvVipBar()
+        if (liveReservation) blockStoryLiveReservation()
+        if (freeData) blockStoryFreeDataPrompt()
         if (ogvKeywords.isNotEmpty()) blockOgvCollection(ogvKeywords)
         if (blockedGotos.isNotEmpty() || textLabels.isNotEmpty()) {
             blockStoryDiversionEntry(blockedGotos, textLabels)
         }
-        Log.s("startHook: BlockStoryGoods (shopCart=$shopCart, adOverlay=$adOverlay, ogvCats=$ogvCategories, textLabels=$textLabels, diversion=$blockedGotos)")
+        Log.s(
+            "startHook: BlockStoryGoods (shopCart=$shopCart, adOverlay=$adOverlay, " +
+                "ogvVipBar=$ogvVipBar, liveReservation=$liveReservation, freeData=$freeData, " +
+                "ogvCats=$ogvCategories, textLabels=$textLabels, diversion=$blockedGotos)",
+        )
     }
 
     /**
@@ -191,6 +207,93 @@ class BlockStoryGoodsHook(classLoader: ClassLoader) : BaseHook(classLoader) {
             }
         }
         Log.x("BlockStoryGoods: hooked StoryDetail.getCollection -> ${handle != null} (keywords=$categoryKeywords)")
+    }
+
+    /**
+     * StoryOgvVipBarWidget renders the OGV "大会员 | 月均仅9.8元 / 抢大会员年卡" bar above the
+     * season title. Visibility is driven by O(ALL) -> z0() and onStart animations; blocking O()
+     * and onStart keeps the bar GONE.
+     */
+    private fun blockStoryOgvVipBar() {
+        val widgetClass = "com.bilibili.video.story.action.widget.StoryOgvVipBarWidget"
+            .findClassOrNull(mClassLoader) ?: run {
+            Log.x("BlockStoryGoods: StoryOgvVipBarWidget not found")
+            return
+        }
+        widgetClass.hookMethod(
+            "O",
+            "com.bilibili.video.story.action.StoryActionType",
+            "com.bilibili.video.story.action.j",
+        ) { chain ->
+            (chain.thisObject as? View)?.visibility = View.GONE
+            null
+        }
+        widgetClass.hookMethod("onStart", Int::class.javaPrimitiveType!!) { null }
+        widgetClass.hookMethod("j2", "com.bilibili.video.story.action.h") { chain ->
+            bindStoryController(chain)
+            null
+        }
+        Log.x("BlockStoryGoods: hooked StoryOgvVipBarWidget")
+    }
+
+    /**
+     * StoryLiveReservationWidget shows the "06-21 21:00 开始直播 | 预约" strip. O(ALL) calls s()
+     * and onRender() also triggers a show pass — block both and keep GONE.
+     */
+    private fun blockStoryLiveReservation() {
+        val widgetClass = "com.bilibili.video.story.action.widget.StoryLiveReservationWidget"
+            .findClassOrNull(mClassLoader) ?: run {
+            Log.x("BlockStoryGoods: StoryLiveReservationWidget not found")
+            return
+        }
+        widgetClass.hookMethod(
+            "O",
+            "com.bilibili.video.story.action.StoryActionType",
+            "com.bilibili.video.story.action.j",
+        ) { chain ->
+            (chain.thisObject as? View)?.visibility = View.GONE
+            null
+        }
+        widgetClass.hookMethod("onRender") { chain ->
+            (chain.thisObject as? View)?.visibility = View.GONE
+            null
+        }
+        widgetClass.hookMethod("j2", "com.bilibili.video.story.action.h") { chain ->
+            bindStoryController(chain)
+            null
+        }
+        Log.x("BlockStoryGoods: hooked StoryLiveReservationWidget")
+    }
+
+    /**
+     * StoryFreeDataPromptComponent attaches the mobile-data "流量卡 / 免流" toast when not on WiFi.
+     * Hook m(controller, container) so the Compose toast is never added.
+     */
+    private fun blockStoryFreeDataPrompt() {
+        val componentClass = "com.bilibili.video.story.action.widget.StoryFreeDataPromptComponent"
+            .findClassOrNull(mClassLoader) ?: run {
+            Log.x("BlockStoryGoods: StoryFreeDataPromptComponent not found")
+            return
+        }
+        componentClass.hookMethod(
+            "m",
+            "com.bilibili.video.story.action.h",
+            ViewGroup::class.java,
+        ) { null }
+        Log.x("BlockStoryGoods: hooked StoryFreeDataPromptComponent.m")
+    }
+
+    private fun bindStoryController(chain: XposedInterface.Chain) {
+        runCatching {
+            val widget = chain.thisObject
+            val controller = chain.args.firstOrNull() ?: return
+            val field = widget.javaClass.declaredFields.firstOrNull {
+                it.type.name == "com.bilibili.video.story.action.h"
+            }
+            field?.isAccessible = true
+            field?.set(widget, controller)
+            (widget as? View)?.visibility = View.GONE
+        }.onFailure { Log.e(it) }
     }
 
     /**
