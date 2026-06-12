@@ -3,22 +3,19 @@ package me.custom.biliextras.hook
 import me.custom.biliextras.utils.Log
 import me.custom.biliextras.utils.ePrefs
 import me.custom.biliextras.utils.hookMethod
-import kotlin.concurrent.thread
 
 class DisableChapterProgressHook(mClassLoader: ClassLoader) : BaseHook(mClassLoader) {
     companion object {
         const val KEY_DISABLE_CHAPTER_PROGRESS = "disable_chapter_progress"
     }
 
-    private val enabled: Boolean
-        get() = ePrefs.getBoolean(KEY_DISABLE_CHAPTER_PROGRESS, true)
+    private val enabled = ePrefs.getBoolean(KEY_DISABLE_CHAPTER_PROGRESS, true)
 
     override fun startHook() {
-        thread(name = "BiliExtrasChapterProgressHook") {
-            hookChronosThumbnailInfo()
-            hookChronosVideoViewPoint()
-            hookChronosWatchPointDispatch()
-        }
+        if (!enabled) return
+        hookChronosThumbnailInfo()
+        hookChronosVideoViewPoint()
+        hookChronosWatchPointDispatch()
         Log.s("DisableChapterProgress: started")
     }
 
@@ -35,11 +32,7 @@ class DisableChapterProgressHook(mClassLoader: ClassLoader) : BaseHook(mClassLoa
         listGetters.forEach { getter ->
             getter.isAccessible = true
             getter.hookMethod { chain ->
-                if (enabled) {
-                    emptyList<Any>()
-                } else {
-                    chain.proceed()
-                }
+                emptyList<Any>()
             }
         }
 
@@ -48,13 +41,7 @@ class DisableChapterProgressHook(mClassLoader: ClassLoader) : BaseHook(mClassLoa
         }
         watchPointListSetters.forEach { setter ->
             setter.isAccessible = true
-            setter.hookMethod { chain ->
-                if (enabled) {
-                    null
-                } else {
-                    chain.proceed()
-                }
-            }
+            setter.hookMethod { null }
         }
 
         Log.x(
@@ -73,18 +60,14 @@ class DisableChapterProgressHook(mClassLoader: ClassLoader) : BaseHook(mClassLoa
             .filter { it.name == "getVideoPointList" && it.parameterCount == 0 }
             .forEach { getter ->
                 getter.isAccessible = true
-                getter.hookMethod { chain ->
-                    if (enabled) arrayListOf<Any>() else chain.proceed()
-                }
+                getter.hookMethod { arrayListOf<Any>() }
             }
 
         videoViewPointClass.declaredMethods
             .filter { it.name == "getPointPermanent" && it.parameterCount == 0 }
             .forEach { getter ->
                 getter.isAccessible = true
-                getter.hookMethod { chain ->
-                    if (enabled) false else chain.proceed()
-                }
+                getter.hookMethod { false }
             }
 
         Log.x("DisableChapterProgress: hooked VideoViewPoint video point source")
@@ -94,13 +77,7 @@ class DisableChapterProgressHook(mClassLoader: ClassLoader) : BaseHook(mClassLoa
         val containerClass = runCatching {
             mClassLoader.loadClass("tv.danmaku.biliplayerv2.service.interact.biz.container.ChronosInteractContainer")
         }.getOrNull() ?: return
-        containerClass.hookMethod("n0", List::class.java) { chain ->
-            if (enabled) {
-                null
-            } else {
-                chain.proceed()
-            }
-        }
+        containerClass.hookMethod("n0", List::class.java) { null }
         Log.x("DisableChapterProgress: hooked ChronosInteractContainer.n0")
     }
 }

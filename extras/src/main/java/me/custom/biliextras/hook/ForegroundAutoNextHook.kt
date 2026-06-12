@@ -8,10 +8,12 @@ import android.net.Uri
 import android.os.Handler
 import android.os.Looper
 import me.custom.biliextras.utils.Log
+import me.custom.biliextras.utils.UnitedScreenStateReflection
 import me.custom.biliextras.utils.ePrefs
 import me.custom.biliextras.utils.findClassOrNull
 import me.custom.biliextras.utils.hookMethod
 import java.lang.reflect.Modifier
+import java.util.concurrent.Executors
 
 /**
  * Foreground auto-play of related (AI-recommended) videos for normal
@@ -40,7 +42,7 @@ class ForegroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoader) {
         Log.s("startHook: ForegroundAutoNext (${ForegroundAutoNextPrefs.enabledShortTitles().joinToString("、")}, ${ForegroundAutoNextPrefs.orientation().title})")
     }
 
-    private fun readRealBackground(repo: Any): Boolean = Companion.readRealBackground(repo)
+    private fun readRealBackground(repo: Any): Boolean = UgcBackgroundPlayReflection.readRealBackground(repo)
 
     private fun hookIsInBackground() {
         val repoClass =
@@ -63,9 +65,7 @@ class ForegroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoader) {
                 return@hookMethod chain.proceed()
             }
             val service = chain.thisObject
-            val repo0 = runCatching {
-                service.javaClass.getDeclaredField("b").apply { isAccessible = true }.get(service)
-            }.getOrNull()
+            val repo0 = UgcBackgroundPlayReflection.repo(service)
             if (repo0 != null && runCatching { readRealBackground(repo0) }.getOrDefault(false)) {
                 activating = false
                 clearPendingCompletion()
@@ -77,10 +77,7 @@ class ForegroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoader) {
                 return@hookMethod chain.proceed()
             }
             activating = false
-            val ctx = runCatching {
-                service.javaClass.getDeclaredField("n")
-                    .apply { isAccessible = true }.get(service) as Context
-            }.getOrNull()
+            val ctx = UgcBackgroundPlayReflection.context(service) as? Context
             if (ctx == null) {
                 resumePendingCompletion(mClassLoader)
                 return@hookMethod chain.proceed()
@@ -131,8 +128,7 @@ class ForegroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoader) {
 
         serviceClass.hookMethod("x", continuationClass) { chain ->
             val service = chain.thisObject
-            val repo = service.javaClass.getDeclaredField("b")
-                .apply { isAccessible = true }.get(service)
+            val repo = UgcBackgroundPlayReflection.repo(service) ?: return@hookMethod chain.proceed()
 
             if (readRealBackground(repo)) {
                 activating = false
@@ -167,8 +163,7 @@ class ForegroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoader) {
             }.onFailure { Log.x("ForegroundAutoNext: G(true) failed: ${it.message}") }
 
             runCatching {
-                service.javaClass.getDeclaredMethod("p")
-                    .apply { isAccessible = true }.invoke(service)
+                UgcBackgroundPlayReflection.invokeServiceP(service)
             }.onFailure { Log.x("ForegroundAutoNext: p() failed: ${it.message}") }
 
             runCatching {
@@ -285,11 +280,11 @@ class ForegroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoader) {
 
         val mainHandler = Handler(Looper.getMainLooper())
 
-        fun readRealBackground(repo: Any): Boolean {
-            val oFlow = repo.javaClass.getDeclaredField("o")
-                .apply { isAccessible = true }.get(repo)
-            return oFlow.javaClass.getMethod("getValue").invoke(oFlow) as Boolean
+        private val netExecutor = Executors.newSingleThreadExecutor { runnable ->
+            Thread(runnable, "biliextras-fg-autonext-net").apply { isDaemon = true }
         }
+
+        fun readRealBackground(repo: Any): Boolean = UgcBackgroundPlayReflection.readRealBackground(repo)
 
         fun abortActivation(classLoader: ClassLoader, reason: String) {
             if (!activating && pendingCompletion == null && fallbackRunnable == null) return
@@ -303,13 +298,9 @@ class ForegroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoader) {
         }
 
         fun isEligibleForForegroundAutoNext(service: Any): Boolean {
-            val repo = runCatching {
-                service.javaClass.getDeclaredField("b").apply { isAccessible = true }.get(service)
-            }.getOrNull() ?: return false
+            val repo = UgcBackgroundPlayReflection.repo(service) ?: return false
             if (readRealBackground(repo)) return false
-            val ctx = runCatching {
-                service.javaClass.getDeclaredField("n").apply { isAccessible = true }.get(service) as Context
-            }.getOrNull() ?: return false
+            val ctx = UgcBackgroundPlayReflection.context(service) as? Context ?: return false
             return isEligibleForegroundContext(ctx)
         }
 
@@ -442,9 +433,7 @@ class ForegroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoader) {
         fun openNextRelate(classLoader: ClassLoader, service: Any, generation: Int = openGeneration) {
             cancelFallback()
             activating = false
-            val ctx = runCatching {
-                service.javaClass.getDeclaredField("n").apply { isAccessible = true }.get(service) as Context
-            }.getOrNull()
+            val ctx = UgcBackgroundPlayReflection.context(service) as? Context
             if (ctx == null) {
                 Log.s("ForegroundAutoNext: no context for relate feed")
                 resumePendingCompletion(classLoader)
@@ -462,7 +451,7 @@ class ForegroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoader) {
                 return
             }
             val fullscreen = isInFullscreen(service)
-            Thread {
+            netExecutor.execute {
                 val uri = runCatching { requestRelateUri(classLoader, avid) }
                     .onFailure { Log.s("ForegroundAutoNext: relate feed failed: ${it.message}") }
                     .getOrNull()
@@ -492,7 +481,7 @@ class ForegroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoader) {
                         resumePendingCompletion(classLoader)
                     }
                 }
-            }.start()
+            }
         }
 
         private data class RelateCandidate(
@@ -515,7 +504,7 @@ class ForegroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoader) {
                 return
             }
             val fullscreen = isInFullscreen(service)
-            Thread {
+            netExecutor.execute {
                 val feed = runCatching { requestRelateCandidates(classLoader, currentAvid) }
                     .onFailure { Log.s("ForegroundAutoNext: relate feed failed: ${it.message}") }
                     .getOrDefault(emptyList())
@@ -555,7 +544,7 @@ class ForegroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoader) {
                     }
                     clearPendingCompletion()
                 }
-            }.start()
+            }
         }
 
         private fun finishSourceActivity(ctx: Context) {
@@ -564,12 +553,7 @@ class ForegroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoader) {
             }
         }
 
-        private fun getCurrentAvid(service: Any): Long? = runCatching {
-            val playbackRepo = service.javaClass.getDeclaredField("d")
-                .apply { isAccessible = true }.get(service)
-            val current = playbackRepo.javaClass.getMethod("w").invoke(playbackRepo)
-            current?.javaClass?.getMethod("b")?.invoke(current) as? Long
-        }.getOrNull()
+        private fun getCurrentAvid(service: Any): Long? = UgcBackgroundPlayReflection.currentAvid(service)
 
         private fun collectAiAvids(service: Any): List<Long> {
             val raw = collectRawAiAvids(service)
@@ -578,18 +562,7 @@ class ForegroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoader) {
             return raw.filter { !BlockChargingVideoHook.shouldBlockAvid(it) }
         }
 
-        private fun collectRawAiAvids(service: Any): List<Long> = runCatching {
-            val repo = service.javaClass.getDeclaredField("b")
-                .apply { isAccessible = true }.get(service)
-            val size = repo.javaClass.getMethod("m").invoke(repo) as Int
-            val cur = repo.javaClass.getMethod("q").invoke(repo) as Int
-            if (size <= 0 || cur + 1 >= size) return@runCatching emptyList<Long>()
-            ((cur + 1) until size).mapNotNull { idx ->
-                val item = repo.javaClass.getMethod("o", Int::class.javaPrimitiveType)
-                    .invoke(repo, idx) ?: return@mapNotNull null
-                item.javaClass.getMethod("a").invoke(item) as? Long
-            }.filter { it > 0L }
-        }.getOrDefault(emptyList())
+        private fun collectRawAiAvids(service: Any): List<Long> = UgcBackgroundPlayReflection.rawAiAvids(service)
 
         private fun pickNextAiAvid(service: Any): Long? = collectAiAvids(service).firstOrNull()
 
@@ -706,13 +679,11 @@ class ForegroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoader) {
 
         /** Whether the current UGC page is in fullscreen (whole-scene) mode. */
         fun isInFullscreen(service: Any): Boolean {
-            val ctx = runCatching {
-                service.javaClass.getDeclaredField("n").apply { isAccessible = true }.get(service)
-            }.getOrNull()
+            val ctx = UgcBackgroundPlayReflection.context(service)
             val roots = listOfNotNull(service, ctx)
             for (root in roots) {
-                findScreenStateRepo(root)?.let { repo ->
-                    val fullscreen = readScreenStateFullscreen(repo)
+                UnitedScreenStateReflection.findScreenStateRepo(root)?.let { repo ->
+                    val fullscreen = UnitedScreenStateReflection.readFullscreen(repo)
                     Log.x("ForegroundAutoNext: isInFullscreen=$fullscreen (screenstate)")
                     return fullscreen
                 }
@@ -744,42 +715,6 @@ class ForegroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoader) {
             return builder.build().toString()
         }
 
-        private fun readScreenStateFullscreen(repo: Any): Boolean {
-            val state = repo.javaClass.getMethod("h").invoke(repo) ?: return false
-            return state.javaClass.getMethod("b").invoke(state) as? Boolean ?: false
-        }
-
-        private fun looksLikeScreenStateRepo(obj: Any): Boolean = runCatching {
-            val cls = obj.javaClass
-            cls.getMethod("h")
-            cls.getMethod("c")
-            cls.getMethod("j", Any::class.java, Boolean::class.javaPrimitiveType)
-            true
-        }.getOrDefault(false)
-
-        private fun findScreenStateRepo(root: Any, maxDepth: Int = 4): Any? {
-            val visited = mutableSetOf<Int>()
-            val queue = ArrayDeque<Pair<Any, Int>>()
-            queue.add(root to 0)
-            while (queue.isNotEmpty()) {
-                val (obj, depth) = queue.removeFirst()
-                val id = System.identityHashCode(obj)
-                if (!visited.add(id)) continue
-                if (looksLikeScreenStateRepo(obj)) return obj
-                if (depth >= maxDepth) continue
-                for (field in obj.javaClass.declaredFields) {
-                    runCatching {
-                        field.isAccessible = true
-                        val value = field.get(obj) ?: return@runCatching
-                        if (shouldTraverseForScreenState(value)) {
-                            queue.add(value to depth + 1)
-                        }
-                    }
-                }
-            }
-            return null
-        }
-
         private fun findPlayerContainer(root: Any, maxDepth: Int = 4): Any? {
             val visited = mutableSetOf<Int>()
             val queue = ArrayDeque<Pair<Any, Int>>()
@@ -794,7 +729,7 @@ class ForegroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoader) {
                     runCatching {
                         field.isAccessible = true
                         val value = field.get(obj) ?: return@runCatching
-                        if (shouldTraverseForScreenState(value)) {
+                        if (fieldShouldTraverse(value)) {
                             queue.add(value to depth + 1)
                         }
                     }
@@ -803,7 +738,7 @@ class ForegroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoader) {
             return null
         }
 
-        private fun shouldTraverseForScreenState(value: Any): Boolean {
+        private fun fieldShouldTraverse(value: Any): Boolean {
             if (value is String || value is Number || value is Boolean || value is Char) return false
             if (value is Class<*>) return false
             val name = value.javaClass.name

@@ -47,29 +47,20 @@ class BlockStoryAdHook(classLoader: ClassLoader) : BaseHook(classLoader) {
 
     private fun isStoryAd(item: Any): Boolean {
         val methods = methodCache.getOrPut(item.javaClass) {
+            val type = item.javaClass
             StoryDetailAdMethods(
-                item.javaClass.findNoArgMethod("isAd"),
-                item.javaClass.findNoArgMethod("isAdHardAndFly"),
-                item.javaClass.findNoArgMethod("isAdImage"),
-                item.javaClass.findNoArgMethod("isAdLive"),
-                item.javaClass.findNoArgMethod("isAdLocal"),
+                StoryDetailReflection.findNoArgMethod(type, "isAd"),
+                StoryDetailReflection.findNoArgMethod(type, "isAdHardAndFly"),
+                StoryDetailReflection.findNoArgMethod(type, "isAdImage"),
+                StoryDetailReflection.findNoArgMethod(type, "isAdLive"),
+                StoryDetailReflection.findNoArgMethod(type, "isAdLocal"),
             )
         }
-        if (methods.isAd?.invokeBool(item) == true) return true
-        if (methods.isAdHardAndFly?.invokeBool(item) == true) return true
-        if (methods.isAdImage?.invokeBool(item) == true) return true
-        if (methods.isAdLive?.invokeBool(item) == true) return true
-        if (methods.isAdLocal?.invokeBool(item) == true) return true
+        if (StoryDetailReflection.invokeBool(methods.isAd, item) == true) return true
+        if (StoryDetailReflection.invokeBool(methods.isAdHardAndFly, item) == true) return true
+        if (StoryDetailReflection.invokeBool(methods.isAdImage, item) == true) return true
+        if (StoryDetailReflection.invokeBool(methods.isAdLive, item) == true) return true
+        if (StoryDetailReflection.invokeBool(methods.isAdLocal, item) == true) return true
         return false
-    }
-
-    private fun Class<*>.findNoArgMethod(name: String): Method? = runCatching {
-        getDeclaredMethod(name).apply { isAccessible = true }
-    }.getOrNull()
-
-    private fun Method.invokeBool(item: Any): Boolean? = try {
-        invoke(item) as? Boolean
-    } catch (_: Exception) {
-        null
     }
 }

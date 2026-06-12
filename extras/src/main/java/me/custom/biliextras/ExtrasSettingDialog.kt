@@ -20,6 +20,7 @@ import android.widget.ListView
 import android.widget.TextView
 import me.custom.biliextras.hook.StoryDiversionPrefs
 import me.custom.biliextras.hook.ForegroundAutoNextPrefs
+import me.custom.biliextras.sponsorblock.SponsorBlockController
 import me.custom.biliextras.sponsorblock.SponsorBlockApi
 import me.custom.biliextras.sponsorblock.SponsorBlockCategory
 import me.custom.biliextras.sponsorblock.SponsorBlockPrefs
@@ -72,10 +73,13 @@ class ExtrasSettingDialog(context: Context) : AlertDialog.Builder(context) {
         override fun onPreferenceChange(preference: Preference?, newValue: Any?): Boolean {
             val key = preference?.key ?: return true
             if (newValue is Boolean) {
-                ePrefs.edit().putBoolean(key, newValue).commit()
-                updateSponsorBlockSummary()
-                updateForegroundAutoNextSummary()
-                updateForegroundAutoNextOrientationSummary()
+                if (key == SponsorBlockPrefs.KEY_ENABLED) {
+                    SponsorBlockController.setEnabled(newValue)
+                    updateSponsorBlockSummary()
+                } else {
+                    ePrefs.edit().putBoolean(key, newValue).commit()
+                    if (key == Log.KEY_VERBOSE) Log.refreshVerboseCache()
+                }
             }
             return true
         }

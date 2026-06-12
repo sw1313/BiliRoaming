@@ -45,23 +45,24 @@ class BlockStoryLiveHook(classLoader: ClassLoader) : BaseHook(classLoader) {
     private fun isStoryLive(item: Any, storyDetail: Class<*>): Boolean {
         val methods = storyDetailMethodCache.getOrPut(storyDetail) {
             StoryDetailMethods(
-                storyDetail.findNoArgMethod("isLive"),
-                storyDetail.findNoArgMethod("isAdLive"),
-                storyDetail.findNoArgMethod("getLiveRoom"),
+                StoryDetailReflection.findNoArgMethod(storyDetail, "isLive"),
+                StoryDetailReflection.findNoArgMethod(storyDetail, "isAdLive"),
+                StoryDetailReflection.findNoArgMethod(storyDetail, "getLiveRoom"),
             )
         }
-        methods.isLive?.invokeBool(item)?.let { if (it) return true }
-        methods.isAdLive?.invokeBool(item)?.let { if (it) return true }
+        StoryDetailReflection.invokeBool(methods.isLive, item)?.let { if (it) return true }
+        StoryDetailReflection.invokeBool(methods.isAdLive, item)?.let { if (it) return true }
         methods.getLiveRoom?.invoke(item)?.let { liveRoom ->
             val liveRoomMethods = liveRoomMethodCache.getOrPut(liveRoom.javaClass) {
+                val type = liveRoom.javaClass
                 LiveRoomMethods(
-                    liveRoom.javaClass.findNoArgMethod("isLiving"),
-                    liveRoom.javaClass.findNoArgMethod("isShowLiving"),
-                    liveRoom.javaClass.findNoArgMethod("getLiveType"),
+                    StoryDetailReflection.findNoArgMethod(type, "isLiving"),
+                    StoryDetailReflection.findNoArgMethod(type, "isShowLiving"),
+                    StoryDetailReflection.findNoArgMethod(type, "getLiveType"),
                 )
             }
-            if (liveRoomMethods.isLiving?.invokeBool(liveRoom) == true ||
-                liveRoomMethods.isShowLiving?.invokeBool(liveRoom) == true
+            if (StoryDetailReflection.invokeBool(liveRoomMethods.isLiving, liveRoom) == true ||
+                StoryDetailReflection.invokeBool(liveRoomMethods.isShowLiving, liveRoom) == true
             ) return true
             val liveType = liveRoomMethods.getLiveType?.invoke(liveRoom) as? String
             if (!liveType.isNullOrBlank()) return true
@@ -78,15 +79,5 @@ class BlockStoryLiveHook(classLoader: ClassLoader) : BaseHook(classLoader) {
         if (removed > 0) {
             Log.d("BlockStoryLive: removed $removed live item(s)")
         }
-    }
-
-    private fun Class<*>.findNoArgMethod(name: String): Method? = runCatching {
-        getDeclaredMethod(name).apply { isAccessible = true }
-    }.getOrNull()
-
-    private fun Method.invokeBool(item: Any): Boolean? = try {
-        invoke(item) as? Boolean
-    } catch (_: Exception) {
-        null
     }
 }

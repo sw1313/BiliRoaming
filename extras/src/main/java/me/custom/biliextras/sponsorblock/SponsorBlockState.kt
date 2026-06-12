@@ -16,10 +16,16 @@ object SponsorBlockState {
         val category: String,
         val color: Int,
         val mode: SponsorBlockCategory.SkipMode,
+        val uuid: String = "",
+        val actionType: String = "skip",
     )
 
     private val version = AtomicLong(0L)
     private val segments = CopyOnWriteArrayList<SegmentView>()
+    @Volatile
+    private var cachedVersion = -1L
+    @Volatile
+    private var cachedSegmentViews: List<SegmentView>? = null
 
     @Volatile
     var currentVideo: Video? = null
@@ -56,6 +62,7 @@ object SponsorBlockState {
         hasSegments = false
         playbackPositionMs = -1L
         lastPositionUpdateTimeMs = 0L
+        cachedSegmentViews = null
         version.incrementAndGet()
     }
 
@@ -73,18 +80,36 @@ object SponsorBlockState {
                     category = segment.category,
                     color = SponsorBlockPrefs.colorOf(segment.category),
                     mode = mode,
+                    uuid = segment.uuid,
+                    actionType = segment.actionType,
                 )
             }
         }
         hasSegments = segments.isNotEmpty()
         showProgress = SponsorBlockPrefs.showProgress
+        cachedSegmentViews = null
         version.incrementAndGet()
     }
 
     fun updatePlaybackPosition(positionMs: Long) {
+        if (positionMs == playbackPositionMs) return
+        val now = System.currentTimeMillis()
+        if (now - lastPositionUpdateTimeMs < 250L) return
         playbackPositionMs = positionMs
-        lastPositionUpdateTimeMs = System.currentTimeMillis()
+        lastPositionUpdateTimeMs = now
     }
 
-    fun snapshot(): Pair<Long, List<SegmentView>> = version.get() to segments.toList()
+    fun segmentViews(): List<SegmentView> {
+        val v = version.get()
+        val cached = cachedSegmentViews
+        if (cached != null && cachedVersion == v) return cached
+        val copy = segments.toList()
+        cachedSegmentViews = copy
+        cachedVersion = v
+        return copy
+    }
+
+    fun contentVersion(): Long = version.get()
+
+    fun snapshot(): Pair<Long, List<SegmentView>> = contentVersion() to segmentViews()
 }

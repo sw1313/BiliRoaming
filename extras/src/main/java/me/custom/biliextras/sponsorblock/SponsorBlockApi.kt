@@ -83,6 +83,77 @@ object SponsorBlockApi {
         Log.w("SponsorBlock track failed: ${it.message}")
     }
 
+    data class SubmitSegment(
+        val start: Double,
+        val end: Double,
+        val category: String,
+        val actionType: String = "skip",
+    )
+
+    fun submitSegments(
+        bvid: String,
+        segments: List<SubmitSegment>,
+    ): Result<String> = runCatching {
+        val segmentArray = JSONArray()
+        segments.forEach { seg ->
+            segmentArray.put(
+                JSONObject().apply {
+                    put("segment", JSONArray().put(seg.start).put(seg.end))
+                    put("category", seg.category)
+                    put("actionType", seg.actionType)
+                },
+            )
+        }
+        val body = JSONObject().apply {
+            put("userID", SponsorBlockPrefs.userId)
+            put("videoID", bvid)
+            put("segments", segmentArray)
+        }.toString()
+        val response = postWithCacheBypass("${SponsorBlockPrefs.server}/api/skipSegments", body)
+        check(response.code in 200..299) { "HTTP ${response.code}: ${response.body.take(120)}" }
+        response.body
+    }.onFailure {
+        Log.w("SponsorBlock submit failed: ${it.message}")
+    }
+
+    fun voteOnSponsorTime(uuid: String, type: Int, category: String? = null): Result<Boolean> = runCatching {
+        val body = JSONObject().apply {
+            put("UUID", uuid)
+            put("userID", SponsorBlockPrefs.userId)
+            put("type", type)
+            if (category != null) put("category", category)
+        }.toString()
+        val response = postWithCacheBypass("${SponsorBlockPrefs.server}/api/voteOnSponsorTime", body)
+        response.code in 200..299
+    }.onFailure {
+        Log.w("SponsorBlock vote failed: ${it.message}")
+    }
+
+    private fun postWithCacheBypass(url: String, body: String): HttpResponse {
+        val bytes = body.toByteArray(StandardCharsets.UTF_8)
+        val connection = (URL(url).openConnection() as HttpURLConnection).apply {
+            requestMethod = "POST"
+            connectTimeout = CONNECT_TIMEOUT_MS
+            readTimeout = READ_TIMEOUT_MS
+            doOutput = true
+            setRequestProperty("content-type", "application/json; charset=utf-8")
+            setRequestProperty("origin", "BiliExtras")
+            setRequestProperty("x-ext-version", BuildConfig.VERSION_NAME)
+            setRequestProperty("user-agent", "BiliExtras/${BuildConfig.VERSION_NAME}")
+            setRequestProperty("x-skip-cache", "1")
+        }
+        try {
+            connection.outputStream.use { it.write(bytes) }
+            val stream = if (connection.responseCode in 200..299) connection.inputStream else connection.errorStream
+            val responseBody = stream?.use { input ->
+                BufferedReader(InputStreamReader(input, StandardCharsets.UTF_8)).readText()
+            }.orEmpty()
+            return HttpResponse(connection.responseCode, responseBody)
+        } finally {
+            connection.disconnect()
+        }
+    }
+
     private fun getWithRetry(url: String): HttpResponse {
         var lastError: Throwable? = null
         repeat(REQUEST_ATTEMPTS) { index ->

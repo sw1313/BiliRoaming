@@ -14,6 +14,24 @@ import java.util.Collections
 import java.util.IdentityHashMap
 import java.util.concurrent.ConcurrentHashMap
 
+private val storyAutoNextMethodCache = ConcurrentHashMap<Pair<Class<*>, String>, Method?>()
+
+private fun Class<*>.cachedStoryMethod(name: String, vararg paramTypes: Class<*>): Method? {
+    val sig = buildString {
+        append(name)
+        paramTypes.forEach { append('#').append(it.name) }
+    }
+    val key = this to sig
+    storyAutoNextMethodCache[key]?.let { return it }
+    val method = if (paramTypes.isEmpty()) {
+        methods.firstOrNull { it.name == name && it.parameterCount == 0 }
+    } else {
+        methods.firstOrNull { it.name == name && it.parameterTypes.contentEquals(paramTypes) }
+    }?.also { it.isAccessible = true }
+    if (method != null) storyAutoNextMethodCache[key] = method
+    return method
+}
+
 class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoader) {
     companion object {
         const val PREF_KEY = "story_background_auto_next"
@@ -55,6 +73,9 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
         var polling = false
 
         @Volatile
+        var pollingRunnable: Runnable? = null
+
+        @Volatile
         var lastNextAtMs = 0L
 
         @Volatile
@@ -74,6 +95,13 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
 
         @Volatile
         var isInBackground = false
+
+        /**
+         * After background play resumes on-screen (w2), keep end-of-playback auto-next via
+         * foreground pager scroll until the user enters background again (u2).
+         */
+        @Volatile
+        var foregroundResumeAutoNext = false
 
         /** Set when triggerNextStory/triggerPreviousBackground moves the engine while paused. */
         @Volatile
@@ -355,6 +383,7 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
             u2PauseMethod.hookMethod { chain ->
                 val player = chain.thisObject
                 isInBackground = true
+                foregroundResumeAutoNext = false
                 backgroundEngineMoved = false
                 // Pager index is authoritative when entering background; foreground swipes move
                 // D1 but do not bump trackedIndex, so reconcile here to avoid stale-high/low.
@@ -389,7 +418,9 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
                 // the video the engine actually played in background.
                 val targetId = storyIdentityAt(savedTracked)
                 Log.x("StoryAutoNext: foreground capture savedPos=$savedPos id=$targetId tracked=$savedTracked pager=$pagerIndex moved=$engineMoved")
+                val fromBackground = isInBackground
                 isInBackground = false
+                if (autoNextEnabled && fromBackground) foregroundResumeAutoNext = true
                 chain.proceed()
                 backgroundEngineMoved = false
                 if (engineMoved && savedTracked != pagerIndex) {
@@ -712,18 +743,20 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
         if (!autoNextEnabled) return
         if (polling) return
         polling = true
-        mainHandler.post(object : Runnable {
+        val runnable = object : Runnable {
             override fun run() {
                 runCatching { checkPlaybackEndAndNext() }.onFailure { Log.e(it) }
                 mainHandler.postDelayed(this, POLL_INTERVAL_MS)
             }
-        })
+        }
+        pollingRunnable = runnable
+        mainHandler.post(runnable)
         Log.x("StoryAutoNext: started end polling")
     }
 
     private fun checkPlaybackEndAndNext() {
-        if (!isInBackground) return
-        val core = activePlayerCore ?: return
+        if (!isInBackground && !foregroundResumeAutoNext) return
+        val core = liveStoryPlayerCore() ?: activePlayerCore ?: return
         val position = core.invokeLongGetter("getCurrentPosition", "getRealCurrentPosition") ?: return
         val duration = core.invokeLongGetter("getDuration", "getRealDuration") ?: return
         prefetchOfficialStoryListIfNeeded()
@@ -732,9 +765,15 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
         if (now - lastNextAtMs < NEXT_COOLDOWN_MS) return
         Log.x(
             "StoryAutoNext: playback ended key=$activeStoryKey, position=$position, duration=$duration, " +
-                "core=${core.javaClass.name}#${System.identityHashCode(core)}",
+                "core=${core.javaClass.name}#${System.identityHashCode(core)} " +
+                "bg=$isInBackground fgResume=$foregroundResumeAutoNext",
         )
-        if (triggerNextStory()) {
+        val advanced = if (isInBackground) {
+            triggerNextStory()
+        } else {
+            triggerForegroundScroll(forward = true)
+        }
+        if (advanced) {
             lastNextAtMs = now
         }
     }
@@ -797,11 +836,29 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
     }
 
     private fun storyItemAt(player: Any, index: Int): Any? = runCatching {
-        val v1 = player.javaClass.methods.firstOrNull {
-            it.name == "V1" && it.parameterTypes.contentEquals(arrayOf(Int::class.javaPrimitiveType))
-        } ?: return@runCatching null
-        v1.invoke(player, index)
+        player.javaClass.cachedStoryMethod("V1", Int::class.javaPrimitiveType!!)
+            ?.invoke(player, index)
     }.getOrNull()
+
+    private fun Any.invokeIntGetter(vararg names: String): Int? {
+        names.forEach { name ->
+            val value = runCatching {
+                javaClass.cachedStoryMethod(name)?.invoke(this) as? Number
+            }.getOrNull()
+            if (value != null) return value.toInt()
+        }
+        return null
+    }
+
+    private fun Any.invokeLongGetter(vararg names: String): Long? {
+        names.forEach { name ->
+            val value = runCatching {
+                javaClass.cachedStoryMethod(name)?.invoke(this) as? Number
+            }.getOrNull()
+            if (value != null) return value.toLong()
+        }
+        return null
+    }
 
     private fun Any.callOfficialStoryLoadMore(index: Int, force: Boolean): Boolean = runCatching {
         val hostFromPlayer = runCatching {
@@ -1084,28 +1141,6 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
             Log.e(it)
             false
         }
-    }
-
-    private fun Any.invokeIntGetter(vararg names: String): Int? {
-        names.forEach { name ->
-            val value = runCatching {
-                javaClass.methods.firstOrNull { method -> method.name == name && method.parameterCount == 0 }
-                    ?.invoke(this) as? Number
-            }.getOrNull()
-            if (value != null) return value.toInt()
-        }
-        return null
-    }
-
-    private fun Any.invokeLongGetter(vararg names: String): Long? {
-        names.forEach { name ->
-            val value = runCatching {
-                javaClass.methods.firstOrNull { method -> method.name == name && method.parameterCount == 0 }
-                    ?.invoke(this) as? Number
-            }.getOrNull()
-            if (value != null) return value.toLong()
-        }
-        return null
     }
 
     private fun Any.callOfficialStoryNext(index: Int): Boolean = runCatching {

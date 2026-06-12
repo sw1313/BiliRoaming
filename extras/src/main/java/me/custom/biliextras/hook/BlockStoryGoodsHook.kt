@@ -4,8 +4,22 @@ import android.view.View
 import android.view.ViewGroup
 import io.github.libxposed.api.XposedInterface
 import me.custom.biliextras.utils.*
+import java.lang.reflect.Field
+import java.lang.reflect.Method
+import java.util.concurrent.ConcurrentHashMap
 
 class BlockStoryGoodsHook(classLoader: ClassLoader) : BaseHook(classLoader) {
+    companion object {
+        private val widgetControllerFieldCache = ConcurrentHashMap<Class<*>, Field?>()
+        private val controllerCartMethodsCache = ConcurrentHashMap<Class<*>, ControllerCartMethods?>()
+    }
+
+    private data class ControllerCartMethods(
+        val getData: Method,
+        val getCartIconInfo: Method,
+        val getEntryGoto: Method,
+        val getEntryText: Method?,
+    )
     override fun startHook() {
         val blockedGotos = StoryDiversionPrefs.blockedGotos()
         val shopCart = StoryDiversionPrefs.shopCartBlocked()
@@ -147,26 +161,48 @@ class BlockStoryGoodsHook(classLoader: ClassLoader) : BaseHook(classLoader) {
      * resolves (never blocking an unknown entry).
      */
     private fun currentCartInfo(widget: Any): CartInfo? {
-        for (field in widget.javaClass.declaredFields) {
-            val info = runCatching {
-                field.isAccessible = true
-                val controller = field.get(widget) ?: return@runCatching null
-                val data = controller.javaClass.getMethod("getData")
-                    .also { it.isAccessible = true }.invoke(controller) ?: return@runCatching null
-                val cartInfo = data.javaClass.getMethod("getCartIconInfo")
-                    .also { it.isAccessible = true }.invoke(data) ?: return@runCatching null
-                val goto = cartInfo.javaClass.getMethod("getEntryGoto")
-                    .also { it.isAccessible = true }.invoke(cartInfo) as? String ?: return@runCatching null
-                val text = runCatching {
-                    cartInfo.javaClass.getMethod("getEntryText")
-                        .also { it.isAccessible = true }.invoke(cartInfo) as? String
-                }.getOrNull()
-                CartInfo(goto, text)
-            }.getOrNull()
-            if (info != null) return info
+        val field = controllerField(widget) ?: return null
+        return readCartInfoFromField(widget, field)
+    }
+
+    private fun controllerField(widget: Any): Field? {
+        val widgetClass = widget.javaClass
+        if (widgetControllerFieldCache.containsKey(widgetClass)) {
+            return widgetControllerFieldCache[widgetClass]
         }
+        for (field in widgetClass.declaredFields) {
+            if (readCartInfoFromField(widget, field) != null) {
+                widgetControllerFieldCache[widgetClass] = field
+                return field
+            }
+        }
+        widgetControllerFieldCache[widgetClass] = null
         return null
     }
+
+    private fun readCartInfoFromField(widget: Any, field: Field): CartInfo? = runCatching {
+        field.isAccessible = true
+        val controller = field.get(widget) ?: return@runCatching null
+        val methods = controllerCartMethodsCache.getOrPut(controller.javaClass) {
+            runCatching {
+                ControllerCartMethods(
+                    getData = controller.javaClass.getMethod("getData").also { it.isAccessible = true },
+                    getCartIconInfo = controller.javaClass.getMethod("getCartIconInfo")
+                        .also { it.isAccessible = true },
+                    getEntryGoto = controller.javaClass.getMethod("getEntryGoto")
+                        .also { it.isAccessible = true },
+                    getEntryText = runCatching {
+                        controller.javaClass.getMethod("getEntryText").also { it.isAccessible = true }
+                    }.getOrNull(),
+                )
+            }.getOrNull()
+        } ?: return@runCatching null
+        val data = methods.getData.invoke(controller) ?: return@runCatching null
+        val cartInfo = methods.getCartIconInfo.invoke(data) ?: return@runCatching null
+        val goto = methods.getEntryGoto.invoke(cartInfo) as? String ?: return@runCatching null
+        val text = methods.getEntryText?.invoke(cartInfo) as? String
+        CartInfo(goto, text)
+    }.getOrNull()
 
     /**
      * 番剧/电影「影视溯源胶片卡」root-cause block. The visible "<类型> | <片名>" chip (e.g.

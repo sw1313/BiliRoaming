@@ -25,6 +25,10 @@ object SponsorBlockPrefs {
     val enabled: Boolean
         get() = ePrefs.getBoolean(KEY_ENABLED, false)
 
+    fun setEnabled(value: Boolean) {
+        ePrefs.edit().putBoolean(KEY_ENABLED, value).commit()
+    }
+
     val showToast: Boolean
         get() = ePrefs.getBoolean(KEY_SHOW_TOAST, true)
 

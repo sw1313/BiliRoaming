@@ -1,5 +1,6 @@
 package me.custom.biliextras.hook
 
+import me.custom.biliextras.utils.UnitedScreenStateReflection
 import me.custom.biliextras.utils.ePrefs
 
 /**
@@ -71,53 +72,14 @@ object ForegroundAutoNextPrefs {
     }
 
     fun getCurrentVideoPortrait(service: Any): Boolean? {
-        val ctx = runCatching {
-            service.javaClass.getDeclaredField("n").apply { isAccessible = true }.get(service)
-        }.getOrNull()
+        val ctx = UgcBackgroundPlayReflection.context(service)
         val roots = listOfNotNull(service, ctx)
         for (root in roots) {
-            findScreenStateRepo(root)?.let { repo ->
-                val state = repo.javaClass.getMethod("h").invoke(repo) ?: return null
-                return state.javaClass.getMethod("e").invoke(state) as? Boolean
+            UnitedScreenStateReflection.findScreenStateRepo(root)?.let { repo ->
+                return UnitedScreenStateReflection.readPortrait(repo)
             }
         }
         return null
-    }
-
-    private fun findScreenStateRepo(root: Any, maxDepth: Int = 4): Any? {
-        val visited = mutableSetOf<Int>()
-        val queue = ArrayDeque<Pair<Any, Int>>()
-        queue.add(root to 0)
-        while (queue.isNotEmpty()) {
-            val (obj, depth) = queue.removeFirst()
-            val id = System.identityHashCode(obj)
-            if (!visited.add(id)) continue
-            if (looksLikeScreenStateRepo(obj)) return obj
-            if (depth >= maxDepth) continue
-            for (field in obj.javaClass.declaredFields) {
-                runCatching {
-                    field.isAccessible = true
-                    val value = field.get(obj) ?: return@runCatching
-                    if (shouldTraverse(value)) queue.add(value to depth + 1)
-                }
-            }
-        }
-        return null
-    }
-
-    private fun looksLikeScreenStateRepo(obj: Any): Boolean = runCatching {
-        val cls = obj.javaClass
-        cls.getMethod("h")
-        cls.getMethod("c")
-        cls.getMethod("j", Any::class.java, Boolean::class.javaPrimitiveType)
-        true
-    }.getOrDefault(false)
-
-    private fun shouldTraverse(value: Any): Boolean {
-        if (value is String || value is Number || value is Boolean || value is Char) return false
-        if (value is Class<*>) return false
-        val name = value.javaClass.name
-        return !(name.startsWith("java.") || name.startsWith("kotlin.") || name.startsWith("kotlinx."))
     }
 
     /**
@@ -126,29 +88,5 @@ object ForegroundAutoNextPrefs {
      * - 合集最后一集: multi-part list but no next part
      * - 单集: only one part in the episode list
      */
-    fun classify(service: Any): Scope {
-        val episodeRepo = runCatching {
-            service.javaClass.getDeclaredField("c").apply { isAccessible = true }.get(service)
-        }.getOrNull() ?: return Scope.SINGLE
-        val playbackRepo = runCatching {
-            service.javaClass.getDeclaredField("d").apply { isAccessible = true }.get(service)
-        }.getOrNull() ?: return Scope.SINGLE
-        val current = runCatching {
-            playbackRepo.javaClass.getMethod("w").invoke(playbackRepo)
-        }.getOrNull()
-        val listSize = runCatching {
-            (episodeRepo.javaClass.getMethod("g").invoke(episodeRepo) as? List<*>)?.size ?: 1
-        }.getOrDefault(1)
-        val hasNext = runCatching {
-            val jMethod = episodeRepo.javaClass.declaredMethods
-                .firstOrNull { it.name == "j" && it.parameterCount == 1 }
-                ?.apply { isAccessible = true } ?: return@runCatching false
-            jMethod.invoke(episodeRepo, current) != null
-        }.getOrDefault(false)
-        return when {
-            hasNext -> Scope.COLLECTION_MIDDLE
-            listSize > 1 -> Scope.COLLECTION_LAST
-            else -> Scope.SINGLE
-        }
-    }
+    fun classify(service: Any): Scope = UgcBackgroundPlayReflection.classifyScope(service)
 }

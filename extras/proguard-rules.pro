@@ -7,3 +7,7 @@
     long token;
     java.lang.ClassLoader classLoader;
 }
+
+-keepclassmembers class kotlin.Unit {
+    public static final kotlin.Unit INSTANCE;
+}

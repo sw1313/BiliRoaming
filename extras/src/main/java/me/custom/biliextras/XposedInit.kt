@@ -40,7 +40,9 @@ class XposedInit : XposedModule() {
                 initHostContext(context)
                 Log.s("BiliExtras activated in $packageName")
                 Log.s("Bilibili version: ${getPackageVersion(packageName)}")
-                Log.d("Config: ${ePrefs.all}")
+                if (runCatching { ePrefs.getBoolean(Log.KEY_VERBOSE, false) }.getOrDefault(false)) {
+                    Log.d("Config: ${ePrefs.all}")
+                }
                 Log.toast("漫游扩展已激活")
                 val pkg = BiliPackageLite(classLoader, context)
                 // 启动期所有 dex 查找共用一个 DexHelper，dex 只解析一次。
@@ -58,6 +60,7 @@ class XposedInit : XposedModule() {
                     startHook { DisableChapterProgressHook(classLoader) }
                     startHook { SponsorBlockHook(classLoader) }
                     startHook { SponsorBlockProgressHook(classLoader) }
+                    startHook { SponsorBlockPlayerMenuHook(classLoader) }
                 }
             }
             chain.proceed()

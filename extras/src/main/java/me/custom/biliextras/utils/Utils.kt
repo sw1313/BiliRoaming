@@ -8,9 +8,11 @@ import android.content.SharedPreferences
 import android.os.Handler
 import android.os.Looper
 import android.widget.Toast
+import me.custom.biliextras.BiliPackageLite.Companion.instance
 import me.custom.biliextras.Constant
 import me.custom.biliextras.XposedInit
 import android.util.Log as ALog
+import java.lang.reflect.Proxy
 
 private lateinit var hostContext: Context
 
@@ -34,8 +36,16 @@ object Log {
      * emitted by default. All other channels ([d]/[i]/[w]/[x]) are per-event traces and stay silent
      * unless the "详细日志" toggle is on, so the LSPosed log only keeps the necessary lines.
      */
+    @Volatile
+    private var cachedVerbose: Boolean? = null
+
     private val verbose: Boolean
-        get() = runCatching { ePrefs.getBoolean(KEY_VERBOSE, false) }.getOrDefault(false)
+        get() = cachedVerbose ?: runCatching { ePrefs.getBoolean(KEY_VERBOSE, false) }
+            .getOrDefault(false).also { cachedVerbose = it }
+
+    fun refreshVerboseCache() {
+        cachedVerbose = runCatching { ePrefs.getBoolean(KEY_VERBOSE, false) }.getOrDefault(false)
+    }
 
     private fun doLog(f: (String, String) -> Int, obj: Any?, toXposed: Boolean = false) {
         val str = if (obj is Throwable) ALog.getStackTraceString(obj) else obj.toString()
@@ -57,6 +67,7 @@ object Log {
 
 fun initHostContext(context: Context) {
     hostContext = context.applicationContext ?: context
+    Log.refreshVerboseCache()
 }
 
 val currentContext: Context
@@ -88,4 +99,36 @@ fun getPackageVersion(packageName: String) = try {
 
 fun Context.addModuleAssets() {
     resources.assets.callMethod("addAssetPath", XposedInit.modulePath)
+}
+
+/**
+ * Wrap a [com.bilibili.lib.moss.api.MossResponseHandler] so [onNext] runs before the original
+ * handler's onNext. Return a non-null reply from [onNext] to replace the payload; return null
+ * to leave it unchanged.
+ */
+fun Any.mossResponseHandlerReplaceProxy(onNext: (reply: Any?) -> Any?): Any {
+    val originalHandler = this
+    val handlerClass = instance.mossResponseHandlerClass
+        ?: throw IllegalStateException("MossResponseHandler class not found")
+    return Proxy.newProxyInstance(
+        javaClass.classLoader,
+        arrayOf(handlerClass),
+    ) { _, method, args ->
+        when (method.name) {
+            "onNext" -> {
+                onNext(args[0])?.let { args[0] = it }
+                method.invoke(originalHandler, *(args ?: emptyArray()))
+            }
+            "onError" -> {
+                val newResponse = onNext(null)
+                if (newResponse == null) {
+                    method.invoke(originalHandler, *(args ?: emptyArray()))
+                } else {
+                    originalHandler.callMethod("onNext", newResponse)
+                    originalHandler.callMethod("onCompleted")
+                }
+            }
+            else -> if (args == null) method.invoke(originalHandler) else method.invoke(originalHandler, *args)
+        }
+    }
 }
