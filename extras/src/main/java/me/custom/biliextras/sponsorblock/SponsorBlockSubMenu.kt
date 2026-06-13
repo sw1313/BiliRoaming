@@ -14,7 +14,6 @@ import android.os.Handler
 import android.os.Looper
 
 import me.custom.biliextras.utils.Log
-
 import java.util.ArrayList
 
 object SponsorBlockSubMenu {
@@ -50,117 +49,64 @@ object SponsorBlockSubMenu {
 
 
     private fun buildAndShowMain(activity: Activity, context: Context) {
-
         val factory = SponsorBlockMenuUiFactory.forClassLoader(activity.classLoader)
-
         val rows = ArrayList<Any>()
+        val total = 5 + SponsorBlockSettingsSubMenu.rowCount()
+        var i = 0
+        fun nextType() = factory.videoSettingTypeForIndex(i++, total)
 
         val segmentCount = SponsorBlockController.segments.size
 
-        val itemCount = 5
-
-        var i = 0
-
-        fun nextType() = factory.videoSettingTypeForIndex(i++, itemCount)
-
-
-
         rows.add(
-
             factory.createInfoRow(
-
                 "片段信息",
-
                 SponsorBlockMenuUiFactory.submenuInfoText(),
-
-                "information-line@500",
-
+                "playdata-square-line@500",
                 nextType(),
-
             ),
-
         )
-
         rows.add(factory.createSwitchRow("空降助手", "skip-beginning-end-line@500", nextType()))
-
         rows.add(
-
             factory.createActionRow(
-
                 "提交片段",
-
                 "pen-write-square-line@500",
-
                 "标记并提交跳过段",
-
                 false,
-
                 nextType(),
-
                 SponsorBlockMenuActionHandler.ACTION_SHOW_SUBMIT,
-
                 context,
-
             ),
-
         )
-
         rows.add(
-
             factory.createActionRow(
-
                 "手动跳过",
-
-                "skip-forward-line@500",
-
+                "arrow-play-next-line@500",
                 if (segmentCount > 0) {
-
                     "共 $segmentCount 个片段 · 点击选择并跳到末尾"
-
                 } else {
-
                     "当前无片段"
-
                 },
-
                 segmentCount > 0,
-
                 nextType(),
-
                 SponsorBlockMenuActionHandler.ACTION_MANUAL_SKIP_CURRENT,
-
                 context,
-
             ),
-
         )
-
         rows.add(
-
             factory.createActionRow(
-
                 "刷新片段",
-
-                "refresh-line@500",
-
+                "arrow-refresh-line@500",
                 "重新拉取当前视频片段",
-
                 false,
-
                 nextType(),
-
                 SponsorBlockMenuActionHandler.ACTION_REFETCH_WITH_TOAST,
-
                 context,
-
             ),
-
         )
-
         rows.add(factory.createSpacer(16))
-
+        SponsorBlockSettingsSubMenu.appendRows(rows, factory, context, ::nextType)
+        rows.add(factory.createSpacer(16))
         showDialog(activity, rows)
-
     }
 
 
@@ -195,7 +141,7 @@ object SponsorBlockSubMenu {
 
                     segmentLabel(segment, index),
 
-                    "skip-forward-line@500",
+                    "arrow-play-next-line@500",
 
                     segmentSummary(segment),
 
@@ -247,6 +193,8 @@ object SponsorBlockSubMenu {
 
         segmentSnapshot.forEachIndexed { index, segment ->
 
+            val voteHint = SponsorBlockState.userVoteLabel(segment.uuid)?.let { " · $it" } ?: ""
+
             rows.add(
 
                 factory.createActionRow(
@@ -255,7 +203,7 @@ object SponsorBlockSubMenu {
 
                     "time-line@500",
 
-                    segmentSummary(segment),
+                    segmentSummary(segment) + voteHint,
 
                     true,
 
@@ -295,7 +243,7 @@ object SponsorBlockSubMenu {
 
         val actions = listOf(
 
-            Triple("手动跳过", "skip-forward-line@500", SponsorBlockMenuActionHandler.ACTION_MANUAL_SKIP_SEGMENT),
+            Triple("手动跳过", "arrow-play-next-line@500", SponsorBlockMenuActionHandler.ACTION_MANUAL_SKIP_SEGMENT),
 
             Triple("跳转到起点", "play-line@500", SponsorBlockMenuActionHandler.ACTION_SEEK_SEGMENT),
 
@@ -309,7 +257,25 @@ object SponsorBlockSubMenu {
 
         )
 
-        val total = actions.size + 1
+        val total = actions.size + 2
+
+        val voteLabel = SponsorBlockState.userVoteLabel(segment.uuid)
+
+        rows.add(
+
+            factory.createInfoRow(
+
+                SponsorBlockCategory.titleOf(segment.category),
+
+                segmentSummary(segment) + (voteLabel?.let { " · $it" } ?: ""),
+
+                "arrow-play-next-line@500",
+
+                factory.videoSettingTypeForIndex(0, total),
+
+            ),
+
+        )
 
         actions.forEachIndexed { actionIndex, (title, icon, action) ->
 
@@ -323,11 +289,11 @@ object SponsorBlockSubMenu {
 
                         icon,
 
-                        if (actionIndex == 0) segmentSummary(segment) else "",
+                        segmentSummary(segment),
 
                         false,
 
-                        factory.videoSettingTypeForIndex(actionIndex, total),
+                        factory.videoSettingTypeForIndex(actionIndex + 1, total),
 
                         action,
 
@@ -339,31 +305,37 @@ object SponsorBlockSubMenu {
 
                 )
 
-                is Pair<*, *> -> rows.add(
+                is Pair<*, *> -> {
 
-                    factory.createActionRow(
+                    val voteType = action.second as Int
 
-                        title,
+                    rows.add(
 
-                        icon,
+                        factory.createActionRow(
 
-                        if (actionIndex == 0) segmentSummary(segment) else "",
+                            title,
 
-                        false,
+                            icon,
 
-                        factory.videoSettingTypeForIndex(actionIndex, total),
+                            SponsorBlockState.voteActionSubtitle(segment.uuid, voteType),
 
-                        action.first as Int,
+                            false,
 
-                        context,
+                            factory.videoSettingTypeForIndex(actionIndex + 1, total),
 
-                        segmentIndex = index,
+                            action.first as Int,
 
-                        voteType = action.second as Int,
+                            context,
 
-                    ),
+                            segmentIndex = index,
 
-                )
+                            voteType = voteType,
+
+                        ),
+
+                    )
+
+                }
 
             }
 
@@ -490,6 +462,8 @@ object SponsorBlockSubMenu {
             }
 
             Log.toast(msg)
+
+            if (ok) showSegmentActions(context, index)
 
         }
 

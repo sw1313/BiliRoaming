@@ -4,69 +4,98 @@ import me.custom.biliextras.utils.Log
 import me.custom.biliextras.utils.ePrefs
 import me.custom.biliextras.utils.findClassOrNull
 import me.custom.biliextras.utils.hookMethod
+import java.util.concurrent.atomic.AtomicReference
 
 /**
  * Media-button (Bluetooth headset / wired remote) previous & next video control.
- *
- * Bilibili routes every headset / lock-screen / notification skip into one
- * MediaSession owned by su1.g (PlayerHeadsetService). Its callback su1.g$b.z()
- * (onSkipToNext) / .A() (onSkipToPrevious) invoke the active playback handler
- * (com.bilibili.playerbizcommon.mediasession.a) .i() / .j(). Different playback
- * types install different handlers, so we intercept at the handler / director
- * level per type:
- *
- *  - Portrait (Story): handler is StoryPlayer$v whose i()/j() are no-ops
- *    ("ignore, story:single loop"). We hook them to drive the story pager
- *    next/previous (scenarios 1 foreground & 2 background).
- *  - Normal video (UGC/Theseus): handler -> DefaultMediaSessionPlayback.i()/j()
- *    -> UGCDirectorSerialOperationsService$a.switchToNext/Previous. For a
- *    foreground video with no next episode (non-collection or last episode), we
- *    open the next related video as a new page, reusing ForegroundAutoNextHook
- *    (scenario 3). Background (scenario 4) is left to the native AI playlist.
- *
- * Finally we force DefaultMediaSessionPlayback.v()/w() (hasNext/hasPrevious),
- * which only gate the advertised PlaybackState action bits (32 = skip-next,
- * 16 = skip-previous), so single-button line-control double/triple-tap and the
- * notification / lock-screen buttons are enabled, not only dedicated hardware
- * NEXT/PREV keys.
  */
 class MediaButtonControlHook(classLoader: ClassLoader) : BaseHook(classLoader) {
-    private companion object {
-        const val PREF_KEY = "media_button_control"
-        const val FOREGROUND_AUTO_NEXT_KEY = "foreground_auto_next"
+    companion object {
+        private const val PREF_KEY = "media_button_control"
+        private const val FOREGROUND_AUTO_NEXT_KEY = "foreground_auto_next"
+        private const val ACTION_SKIP_TO_PREVIOUS = 16
+        private const val ACTION_SKIP_TO_NEXT = 32
 
-        const val STORY_HANDLER = "com.bilibili.video.story.player.StoryPlayer\$v"
-        const val UGC_DIRECTOR_INNER =
+        private const val STORY_HANDLER = "com.bilibili.video.story.player.StoryPlayer\$v"
+        private const val UGC_DIRECTOR_INNER =
             "com.bilibili.ship.theseus.ugc.playercontainer.UGCDirectorSerialOperationsService\$a"
-        const val UGC_DIRECTOR =
+        private const val UGC_DIRECTOR =
             "com.bilibili.ship.theseus.ugc.playercontainer.UGCDirectorSerialOperationsService"
-        const val DEFAULT_MEDIA_SESSION_PLAYBACK =
+        private const val DEFAULT_MEDIA_SESSION_PLAYBACK =
             "com.bilibili.playerbizcommon.mediasession.DefaultMediaSessionPlayback"
+
+        private val liveClassLoader = AtomicReference<ClassLoader>()
+
+        fun isEnabled(): Boolean = ePrefs.getBoolean(PREF_KEY, false)
+
+        @JvmStatic
+        fun onPrefChanged(enabled: Boolean) {
+            Log.x("MediaButton: pref -> $enabled")
+            liveClassLoader.get()?.let { loader ->
+                refreshMediaSessionActions(loader)
+            }
+        }
+
+        private fun refreshMediaSessionActions(classLoader: ClassLoader) {
+            val cls = DEFAULT_MEDIA_SESSION_PLAYBACK.findClassOrNull(classLoader) ?: return
+            val refresh = cls.declaredMethods.firstOrNull { method ->
+                method.parameterCount == 0 &&
+                    method.name in setOf("g", "h", "k", "l", "m", "n", "o", "p", "q", "r", "s", "t", "u")
+            } ?: return
+            runCatching {
+                val instance = findMediaSessionPlaybackInstance(cls) ?: return
+                refresh.isAccessible = true
+                refresh.invoke(instance)
+                Log.x("MediaButton: refreshed session via ${cls.simpleName}.${refresh.name}()")
+            }.onFailure {
+                Log.x("MediaButton: session refresh failed: ${it.message}")
+            }
+        }
+
+        private fun findMediaSessionPlaybackInstance(cls: Class<*>): Any? {
+            return runCatching {
+                cls.declaredFields.firstOrNull { field ->
+                    java.lang.reflect.Modifier.isStatic(field.modifiers) &&
+                        field.type == cls
+                }?.apply { isAccessible = true }?.get(null)
+            }.getOrNull()
+        }
+
+        private fun augmentSkipActions(result: Any?): Any? {
+            if (!isEnabled()) return result
+            return when (result) {
+                is Int -> result or ACTION_SKIP_TO_PREVIOUS or ACTION_SKIP_TO_NEXT
+                is Long -> result or ACTION_SKIP_TO_PREVIOUS.toLong() or ACTION_SKIP_TO_NEXT.toLong()
+                else -> result
+            }
+        }
+
+        internal fun setLiveClassLoader(classLoader: ClassLoader) {
+            liveClassLoader.set(classLoader)
+        }
     }
 
     override fun startHook() {
-        if (!ePrefs.getBoolean(PREF_KEY, false)) return
+        setLiveClassLoader(mClassLoader)
         hookStorySkip()
         hookNormalNext()
         hookAdvertiseActions()
         Log.s("startHook: MediaButtonControl")
     }
 
-    /**
-     * Scenarios 1 & 2: portrait (Story) foreground / background. The native
-     * StoryPlayer$v.i()/j() are no-ops; replace them with story pager navigation.
-     */
     private fun hookStorySkip() {
         val handlerClass = STORY_HANDLER.findClassOrNull(mClassLoader) ?: run {
             Log.x("MediaButton: StoryPlayer\$v not found")
             return
         }
         handlerClass.hookMethod("i") {
+            if (!isEnabled()) return@hookMethod null
             Log.x("MediaButton: story next")
             StoryBackgroundAutoNextHook.mediaNext()
             null
         }
         handlerClass.hookMethod("j") {
+            if (!isEnabled()) return@hookMethod null
             Log.x("MediaButton: story previous")
             StoryBackgroundAutoNextHook.mediaPrevious()
             null
@@ -74,17 +103,15 @@ class MediaButtonControlHook(classLoader: ClassLoader) : BaseHook(classLoader) {
         Log.x("MediaButton: hooked ${handlerClass.name}.i()/j()")
     }
 
-    /**
-     * Scenario 3: normal video foreground with no next episode -> open next
-     * related video as a new page. Background (scenario 4) and collections with a
-     * next part are left to native handling.
-     */
     private fun hookNormalNext() {
         val innerClass = UGC_DIRECTOR_INNER.findClassOrNull(mClassLoader) ?: run {
             Log.x("MediaButton: UGCDirectorSerialOperationsService\$a not found")
             return
         }
         innerClass.hookMethod("switchToNext", Boolean::class.javaPrimitiveType) { chain ->
+            if (!isEnabled()) {
+                return@hookMethod chain.proceed()
+            }
             if (!ePrefs.getBoolean(FOREGROUND_AUTO_NEXT_KEY, false)) {
                 return@hookMethod chain.proceed()
             }
@@ -98,7 +125,6 @@ class MediaButtonControlHook(classLoader: ClassLoader) : BaseHook(classLoader) {
                 repo.javaClass.getMethod("w").invoke(repo) as Boolean
             }.getOrDefault(true)
             if (isBackground) {
-                // Scenario 4: native AI background playlist already handles next.
                 return@hookMethod chain.proceed()
             }
 
@@ -124,19 +150,24 @@ class MediaButtonControlHook(classLoader: ClassLoader) : BaseHook(classLoader) {
         }?.apply { isAccessible = true }?.get(inner)
     }
 
-    /**
-     * Force hasNext / hasPrevious so the MediaSession advertises ACTION_SKIP_TO_NEXT
-     * (32) and ACTION_SKIP_TO_PREVIOUS (16). These methods are only consumed by
-     * DefaultMediaSessionPlayback.g() to build the PlaybackState action mask, so
-     * forcing them true merely enables the buttons; it never triggers a skip.
-     */
     private fun hookAdvertiseActions() {
         val cls = DEFAULT_MEDIA_SESSION_PLAYBACK.findClassOrNull(mClassLoader) ?: run {
             Log.x("MediaButton: DefaultMediaSessionPlayback not found")
             return
         }
-        cls.hookMethod("v") { true }
-        cls.hookMethod("w") { true }
-        Log.x("MediaButton: forcing skip actions advertised (v()/w())")
+        cls.hookMethod("v") { isEnabled() }
+        cls.hookMethod("w") { isEnabled() }
+        hookPlaybackActionMask(cls, "g")
+        hookPlaybackActionMask(cls, "f")
+        Log.x("MediaButton: hooked skip action advertisement")
+    }
+
+    private fun hookPlaybackActionMask(cls: Class<*>, methodName: String) {
+        val method = cls.declaredMethods.firstOrNull {
+            it.name == methodName && it.parameterCount == 0
+        } ?: return
+        method.hookMethod { chain ->
+            augmentSkipActions(chain.proceed())
+        }
     }
 }

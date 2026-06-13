@@ -23,6 +23,14 @@ public final class SponsorBlockMenuActionHandler implements InvocationHandler {
     public static final int ACTION_SEEK_SEGMENT = 10;
     public static final int ACTION_VOTE_SEGMENT = 11;
     public static final int ACTION_CHANGE_CATEGORY = 12;
+    public static final int ACTION_TOGGLE_SHOW_TOAST = 13;
+    public static final int ACTION_TOGGLE_SHOW_PROGRESS = 14;
+    public static final int ACTION_TOGGLE_TRACK_STATS = 15;
+    public static final int ACTION_EDIT_BLOCK_LIMIT = 16;
+    public static final int ACTION_EDIT_USER_ID = 17;
+    public static final int ACTION_EDIT_SERVER = 18;
+    public static final int ACTION_CHECK_SERVICE = 19;
+    public static final int ACTION_OPEN_CATEGORY = 20;
 
     private final int actionId;
     private final Context context;
@@ -79,6 +87,15 @@ public final class SponsorBlockMenuActionHandler implements InvocationHandler {
             Object checkedFlow
     ) {
         return bind(hostClassLoader, fn0Interface, ACTION_TOGGLE_ENABLED, null, 0, 0, checkedFlow);
+    }
+
+    public static Object createPrefToggle(
+            ClassLoader hostClassLoader,
+            Class<?> fn0Interface,
+            int actionId,
+            Object checkedFlow
+    ) {
+        return bind(hostClassLoader, fn0Interface, actionId, null, 0, 0, checkedFlow);
     }
 
     private static Object bind(
@@ -153,6 +170,30 @@ public final class SponsorBlockMenuActionHandler implements InvocationHandler {
                 break;
             case ACTION_CHANGE_CATEGORY:
                 SponsorBlockMenuActions.changeSegmentCategory(context, segmentIndex);
+                break;
+            case ACTION_TOGGLE_SHOW_TOAST:
+                SponsorBlockMenuActions.toggleShowToast(toggleFlow);
+                break;
+            case ACTION_TOGGLE_SHOW_PROGRESS:
+                SponsorBlockMenuActions.toggleShowProgress(toggleFlow);
+                break;
+            case ACTION_TOGGLE_TRACK_STATS:
+                SponsorBlockMenuActions.toggleTrackStats(toggleFlow);
+                break;
+            case ACTION_EDIT_BLOCK_LIMIT:
+                SponsorBlockMenuActions.editBlockLimit(context);
+                break;
+            case ACTION_EDIT_USER_ID:
+                SponsorBlockMenuActions.editUserId(context);
+                break;
+            case ACTION_EDIT_SERVER:
+                SponsorBlockMenuActions.editServer(context);
+                break;
+            case ACTION_CHECK_SERVICE:
+                SponsorBlockMenuActions.checkService(context);
+                break;
+            case ACTION_OPEN_CATEGORY:
+                SponsorBlockMenuActions.openCategory(context, segmentIndex);
                 break;
             default:
                 break;

@@ -60,14 +60,16 @@ object SponsorBlockSubmitSubMenu {
             Triple("结束时间", "time-line@500", 1),
             Triple("类别", "flag-line@500", 2),
             Triple("保存修改", "check-line@500", 3),
-            Triple("反对（删除）", "thumb-down-line@500", 4),
+            Triple("赞成", "thumb-up-line@500", 6),
+            Triple("反对", "thumb-down-line@500", 4),
             Triple("撤销投票", "arrow-go-back-line@500", 5),
         )
         val total = actions.size + 1
+        val voteLabel = SponsorBlockState.userVoteLabel(segment.uuid)
         rows.add(
             factory.createInfoRow(
                 SponsorBlockCategory.titleOf(segment.category),
-                timeRange(edit.startMs, edit.endMs),
+                timeRange(edit.startMs, edit.endMs) + (voteLabel?.let { " · $it" } ?: ""),
                 "skip-forward-line@500",
                 factory.videoSettingTypeForIndex(0, total),
             ),
@@ -78,6 +80,9 @@ object SponsorBlockSubmitSubMenu {
                 1 -> SponsorBlockTimeFormat.formatMs(edit.endMs)
                 2 -> SponsorBlockCategory.titleOf(edit.categoryId)
                 3 -> if (hasExistingChanges(index, segment)) "提交新时间并标记旧片段" else "未修改"
+                4 -> SponsorBlockState.voteActionSubtitle(segment.uuid, 0)
+                5 -> SponsorBlockState.voteActionSubtitle(segment.uuid, 20)
+                6 -> SponsorBlockState.voteActionSubtitle(segment.uuid, 1)
                 else -> ""
             }
             rows.add(
@@ -250,6 +255,7 @@ object SponsorBlockSubmitSubMenu {
             3 -> saveExistingEdit(context, index, segment)
             4 -> downvoteExisting(context, index, segment)
             5 -> unvoteExisting(context, index, segment)
+            6 -> upvoteExisting(context, index, segment)
         }
     }
 
@@ -373,11 +379,12 @@ object SponsorBlockSubmitSubMenu {
                 val startMs = edit?.startMs ?: segment.startMs
                 val endMs = edit?.endMs ?: segment.endMs
                 val categoryId = edit?.categoryId ?: segment.category
+                val voteHint = SponsorBlockState.userVoteLabel(segment.uuid)?.let { " · $it" } ?: ""
                 rows.add(
                     factory.createSubmitActionRow(
                         SponsorBlockCategory.titleOf(categoryId),
                         "time-line@500",
-                        timeRange(startMs, endMs),
+                        timeRange(startMs, endMs) + voteHint,
                         true,
                         nextType(),
                         SponsorBlockSubmitActionHandler.OPEN_EXISTING,
@@ -458,15 +465,26 @@ object SponsorBlockSubmitSubMenu {
 
     private fun downvoteExisting(context: Context, index: Int, segment: SponsorBlockState.SegmentView) {
         if (segment.uuid.isBlank()) {
-            Log.toast("该片段无 UUID，无法删除")
+            Log.toast("该片段无 UUID，无法投票")
             return
         }
         SponsorBlockController.vote(segment.uuid, 0) { ok ->
-            Log.toast(if (ok) "已反对该片段" else "操作失败")
+            Log.toast(if (ok) "已反对" else "操作失败")
             if (ok) {
                 existingEdits.remove(index)
-                showMain(context)
+                showExistingEdit(context, index)
             }
+        }
+    }
+
+    private fun upvoteExisting(context: Context, index: Int, segment: SponsorBlockState.SegmentView) {
+        if (segment.uuid.isBlank()) {
+            Log.toast("该片段无 UUID，无法投票")
+            return
+        }
+        SponsorBlockController.vote(segment.uuid, 1) { ok ->
+            Log.toast(if (ok) "已赞成" else "赞成失败")
+            if (ok) showExistingEdit(context, index)
         }
     }
 
@@ -477,7 +495,7 @@ object SponsorBlockSubmitSubMenu {
         }
         SponsorBlockController.vote(segment.uuid, 20) { ok ->
             Log.toast(if (ok) "已撤销投票" else "操作失败")
-            if (ok) showMain(context)
+            if (ok) showExistingEdit(context, index)
         }
     }
 

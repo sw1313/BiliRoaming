@@ -50,18 +50,52 @@ object ForegroundAutoNextPrefs {
 
     enum class Orientation(val value: String, val title: String) {
         NONE("none", "无"),
-        MATCH("match", "与上一视频方向一致"),
+        MATCH("match", "与上一视频方向尽量一致"),
         PORTRAIT("portrait", "尽量竖屏"),
         LANDSCAPE("landscape", "尽量横屏"),
     }
 
+    enum class UpPref(val value: String, val title: String) {
+        NONE("none", "无"),
+        DIFFERENT("different", "尽量与上一 up 不一致"),
+        SAME("same", "尽量与上一 up 一致"),
+    }
+
+    enum class TagPref(val value: String, val title: String) {
+        NONE("none", "无"),
+        SAME("same", "尽量与上一视频含相同 tag"),
+        DIFFERENT("different", "尽量与上一视频不含相同 tag"),
+    }
+
     const val KEY_ORIENTATION = "foreground_auto_next_orientation"
+    const val KEY_UP = "foreground_auto_next_up"
+    const val KEY_TAG = "foreground_auto_next_tag"
 
     val orientationEntries = Orientation.entries.toList()
+    val upEntries = UpPref.entries.toList()
+    val tagEntries = TagPref.entries.toList()
 
     fun orientation(): Orientation =
         orientationEntries.firstOrNull { it.value == ePrefs.getString(KEY_ORIENTATION, Orientation.MATCH.value) }
             ?: Orientation.MATCH
+
+    fun upPref(): UpPref =
+        upEntries.firstOrNull { it.value == ePrefs.getString(KEY_UP, UpPref.NONE.value) }
+            ?: UpPref.NONE
+
+    fun tagPref(): TagPref =
+        tagEntries.firstOrNull { it.value == ePrefs.getString(KEY_TAG, TagPref.NONE.value) }
+            ?: TagPref.NONE
+
+    fun hasActiveVideoPickPrefs(): Boolean =
+        orientation() != Orientation.NONE || upPref() != UpPref.NONE || tagPref() != TagPref.NONE
+
+    /** up / tag matching needs View API; orientation can use relate-feed dimensions only. */
+    fun needsNetworkMeta(): Boolean =
+        upPref() != UpPref.NONE || tagPref() != TagPref.NONE
+
+    fun videoPrefsSummary(): String =
+        "方向：${orientation().title} · up：${upPref().title} · tag：${tagPref().title}"
 
     /** null = no orientation filter (pick first in AI / feed order). */
     fun resolvePreferPortrait(service: Any): Boolean? = when (orientation()) {

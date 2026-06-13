@@ -1,6 +1,7 @@
 package me.custom.biliextras.sponsorblock
 
 import android.content.Context
+import me.custom.biliextras.playback.PlaybackMenuActionHandler
 import me.custom.biliextras.utils.Log
 import me.custom.biliextras.utils.from
 import java.lang.reflect.Constructor
@@ -118,6 +119,98 @@ class SponsorBlockMenuUiFactory private constructor(private val classLoader: Cla
         val row = descriptionComponentClass!!.getConstructor(argsClass).newInstance(args)
         return wrapRunningComponent(row)
     }
+
+    fun createSettingsSwitchRow(
+        title: String,
+        icon: String,
+        enabled: Boolean,
+        toggleActionId: Int,
+        videoSettingType: Any,
+        fullscreenInline: Boolean = false,
+    ): Any {
+        val flow = mutableStateFlow(enabled)
+        val argsClass = switchArgsClass ?: error("VideoSettingSwitchComponent.a missing")
+        val ctor = argsClass.primaryConstructor()
+        val fn0Class = ctor.parameterTypes[4]
+        val switchColors = switchColors(fullscreenInline)
+        val args = ctor.newInstance(
+            title,
+            "",
+            icon,
+            flow,
+            SponsorBlockMenuActionHandler.createPrefToggle(classLoader, fn0Class, toggleActionId, flow),
+            null,
+            false,
+            switchColors[0],
+            switchColors[1],
+            switchColors[2],
+            switchColors[3],
+            switchColors[4],
+            switchColors[5],
+            videoSettingType,
+        )
+        val switch = switchComponentClass!!.getConstructor(argsClass).newInstance(args)
+        return wrapRunningComponent(switch)
+    }
+
+    fun createPlaybackSwitchRow(
+        title: String,
+        icon: String,
+        enabled: Boolean,
+        toggleActionId: Int,
+        videoSettingType: Any,
+        fullscreenInline: Boolean = false,
+    ): Any {
+        val flow = mutableStateFlow(enabled)
+        val argsClass = switchArgsClass ?: error("VideoSettingSwitchComponent.a missing")
+        val ctor = argsClass.primaryConstructor()
+        val fn0Class = ctor.parameterTypes[4]
+        val switchColors = switchColors(fullscreenInline)
+        val args = ctor.newInstance(
+            title,
+            "",
+            icon,
+            flow,
+            PlaybackMenuActionHandler.createToggle(classLoader, fn0Class, toggleActionId, flow),
+            null,
+            false,
+            switchColors[0],
+            switchColors[1],
+            switchColors[2],
+            switchColors[3],
+            switchColors[4],
+            switchColors[5],
+            videoSettingType,
+        )
+        val switch = switchComponentClass!!.getConstructor(argsClass).newInstance(args)
+        return wrapRunningComponent(switch)
+    }
+
+    fun createPlaybackActionRow(
+        title: String,
+        icon: String,
+        subtitle: String,
+        withArrow: Boolean,
+        videoSettingType: Any,
+        actionId: Int,
+        context: Context,
+        fullscreenInline: Boolean = false,
+    ): Any = createActionRow(
+        title = title,
+        icon = icon,
+        subtitle = subtitle,
+        withArrow = withArrow,
+        videoSettingType = videoSettingType,
+        actionId = actionId,
+        context = context,
+        onClickOverride = run {
+            val argsClass = descriptionArgsClass ?: error("VideoSettingDescriptionComponent.a missing")
+            val ctor = argsClass.primaryConstructor()
+            val fn0Class = ctor.parameterTypes[7]
+            PlaybackMenuActionHandler.create(classLoader, fn0Class, actionId, context)
+        },
+        fullscreenInline = fullscreenInline,
+    )
 
     fun createSwitchRow(
         title: String,
@@ -464,6 +557,15 @@ class SponsorBlockMenuUiFactory private constructor(private val classLoader: Cla
                 }
                 else -> "$count 个片段 · 播放头不在片段内"
             }
+        }
+
+        @JvmStatic
+        fun readBooleanFlow(flow: Any?): Boolean? {
+            if (flow == null) return null
+            val getValue = flow.javaClass.methods.firstOrNull {
+                it.name == "getValue" && it.parameterCount == 0
+            }
+            return runCatching { getValue?.invoke(flow) as? Boolean }.getOrNull()
         }
 
         @JvmStatic

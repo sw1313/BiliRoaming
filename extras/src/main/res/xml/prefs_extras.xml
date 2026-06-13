@@ -1,42 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <PreferenceScreen xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <PreferenceCategory android:title="@string/playback_group">
-        <SwitchPreference
-            android:defaultValue="false"
-            android:key="foreground_auto_next"
-            android:summary="@string/foreground_auto_next_summary"
-            android:title="@string/foreground_auto_next_title" />
-
-        <Preference
-            android:key="foreground_auto_next_scopes"
-            android:summary="@string/foreground_auto_next_scopes_summary"
-            android:title="@string/foreground_auto_next_scopes_title" />
-
-        <Preference
-            android:key="foreground_auto_next_orientation"
-            android:summary="@string/foreground_auto_next_orientation_summary"
-            android:title="@string/foreground_auto_next_orientation_title" />
-
-        <SwitchPreference
-            android:defaultValue="false"
-            android:key="story_background_auto_next"
-            android:summary="@string/story_background_auto_next_summary"
-            android:title="@string/story_background_auto_next_title" />
-
-        <SwitchPreference
-            android:defaultValue="false"
-            android:key="media_button_control"
-            android:summary="@string/media_button_control_summary"
-            android:title="@string/media_button_control_title" />
-
-        <SwitchPreference
-            android:defaultValue="true"
-            android:key="disable_chapter_progress"
-            android:summary="@string/disable_chapter_progress_summary"
-            android:title="@string/disable_chapter_progress_title" />
-    </PreferenceCategory>
-
     <PreferenceCategory android:title="@string/block_group">
         <SwitchPreference
             android:defaultValue="false"
@@ -90,19 +54,6 @@
             android:key="block_charging_video_log"
             android:summary="@string/block_charging_video_log_summary"
             android:title="@string/block_charging_video_log_title" />
-    </PreferenceCategory>
-
-    <PreferenceCategory android:title="@string/sponsorblock_group">
-        <SwitchPreference
-            android:defaultValue="false"
-            android:key="sponsorblock_enable"
-            android:summary="@string/sponsorblock_enable_summary"
-            android:title="@string/sponsorblock_enable_title" />
-
-        <Preference
-            android:key="sponsorblock_settings"
-            android:summary="@string/sponsorblock_settings_summary"
-            android:title="@string/sponsorblock_settings_title" />
     </PreferenceCategory>
 
     <PreferenceCategory android:title="@string/misc_group">

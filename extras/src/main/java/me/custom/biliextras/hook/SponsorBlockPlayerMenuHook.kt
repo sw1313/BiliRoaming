@@ -6,6 +6,8 @@ import android.view.Gravity
 import android.view.ViewGroup
 import android.widget.FrameLayout
 import android.widget.TextView
+import me.custom.biliextras.playback.PlaybackMenuRows
+import me.custom.biliextras.playback.PlayerMenuKind
 import me.custom.biliextras.sponsorblock.SponsorBlockController
 import me.custom.biliextras.sponsorblock.SponsorBlockMenuHost
 import me.custom.biliextras.sponsorblock.SponsorBlockMenuUiFactory
@@ -47,7 +49,7 @@ class SponsorBlockPlayerMenuHook(classLoader: ClassLoader) : BaseHook(classLoade
             SponsorBlockMenuHost.setFullscreenWidget(chain.thisObject)
             val context = extractContext(chain.thisObject) ?: return@hookMethod original
             val settingType = chain.args[1]
-            prependMainEntry(original.toMutableList(), context, settingType)
+            prependMainEntry(original.toMutableList(), context, settingType, PlayerMenuKind.UGC)
         }
         Log.x("SponsorBlockPlayerMenu: hooked PlayerSettingFunctionWidget2.v0(autoPlayer)")
     }
@@ -64,7 +66,7 @@ class SponsorBlockPlayerMenuHook(classLoader: ClassLoader) : BaseHook(classLoade
             val settingItem = chain.args[0]
             if (settingItemTypeName(settingItem) == TYPE_AUTO_PLAY) {
                 SponsorBlockMenuHost.clearFullscreenWidget()
-                injectMainEntry(chain.thisObject, chain.args[1])
+                injectMainEntry(chain.thisObject, chain.args[1], PlayerMenuKind.UGC)
             }
             chain.proceed()
         }
@@ -89,7 +91,7 @@ class SponsorBlockPlayerMenuHook(classLoader: ClassLoader) : BaseHook(classLoade
             val settingItem = chain.args[0]
             if (settingItemTypeName(settingItem) == TYPE_STORY_AUTO_SCROLL) {
                 SponsorBlockMenuHost.clearFullscreenWidget()
-                injectMainEntry(chain.thisObject, chain.args[1])
+                injectMainEntry(chain.thisObject, chain.args[1], PlayerMenuKind.STORY)
             }
             chain.proceed()
         }
@@ -132,7 +134,7 @@ class SponsorBlockPlayerMenuHook(classLoader: ClassLoader) : BaseHook(classLoade
         return false
     }
 
-    private fun injectMainEntry(menuHost: Any, videoSettingType: Any?) {
+    private fun injectMainEntry(menuHost: Any, videoSettingType: Any?, kind: PlayerMenuKind) {
         val list = settingListLocal.get() ?: run {
             Log.w("SponsorBlockPlayerMenu: inject skipped, \$list ThreadLocal empty")
             return
@@ -143,9 +145,11 @@ class SponsorBlockPlayerMenuHook(classLoader: ClassLoader) : BaseHook(classLoade
         }
         val settingType = videoSettingType ?: uiFactory.middleVideoSettingType() ?: return
         val index = list.size
+        SponsorBlockMenuHost.setPlayerMenuKind(kind)
         uiFactory.createMainEntryRow(context, settingType)?.let {
             list.add(index, it)
-            Log.x("SponsorBlockPlayerMenu: injected main entry at index=$index")
+            PlaybackMenuRows.injectAfterSponsorBlock(uiFactory, list, context, kind, index + 1)
+            Log.x("SponsorBlockPlayerMenu: injected main + playback entries at index=$index kind=$kind")
         } ?: Log.w("SponsorBlockPlayerMenu: inject failed, row creation returned null")
     }
 
@@ -153,10 +157,13 @@ class SponsorBlockPlayerMenuHook(classLoader: ClassLoader) : BaseHook(classLoade
         rows: MutableList<Any>,
         context: Context,
         settingType: Any,
+        kind: PlayerMenuKind,
     ): List<Any> {
         uiFactory.createMainEntryRow(context, settingType)?.let {
+            SponsorBlockMenuHost.setPlayerMenuKind(kind)
             rows.add(0, it)
-            Log.x("SponsorBlockPlayerMenu: prepended main entry in fullscreen menu")
+            PlaybackMenuRows.injectAfterSponsorBlock(uiFactory, rows, context, kind, 1)
+            Log.x("SponsorBlockPlayerMenu: prepended main + playback entries in fullscreen menu kind=$kind")
         } ?: Log.w("SponsorBlockPlayerMenu: prepend skipped, row creation failed")
         return rows
     }

@@ -1,5 +1,6 @@
 package me.custom.biliextras.sponsorblock
 
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.atomic.AtomicLong
 
@@ -22,6 +23,8 @@ object SponsorBlockState {
 
     private val version = AtomicLong(0L)
     private val segments = CopyOnWriteArrayList<SegmentView>()
+    /** Local vote state keyed by segment UUID (1=up, 0=down). Cleared on video reset. */
+    private val userVotesByUuid = ConcurrentHashMap<String, Int>()
     @Volatile
     private var cachedVersion = -1L
     @Volatile
@@ -56,9 +59,35 @@ object SponsorBlockState {
         lastPositionUpdateTimeMs = 0L
     }
 
+    fun recordUserVote(uuid: String, type: Int) {
+        if (uuid.isBlank()) return
+        if (type == 20) {
+            userVotesByUuid.remove(uuid)
+        } else {
+            userVotesByUuid[uuid] = type
+        }
+    }
+
+    fun userVoteLabel(uuid: String): String? = when (userVotesByUuid[uuid]) {
+        1 -> "已赞成"
+        0 -> "已反对"
+        else -> null
+    }
+
+    fun voteActionSubtitle(uuid: String, actionVoteType: Int): String {
+        val current = userVoteLabel(uuid)
+        return when (actionVoteType) {
+            1 -> if (current == "已赞成") "已赞成" else ""
+            0 -> if (current == "已反对") "已反对" else ""
+            20 -> current?.let { "当前：$it" } ?: ""
+            else -> ""
+        }
+    }
+
     fun reset(video: Video?) {
         currentVideo = video
         segments.clear()
+        userVotesByUuid.clear()
         hasSegments = false
         playbackPositionMs = -1L
         lastPositionUpdateTimeMs = 0L

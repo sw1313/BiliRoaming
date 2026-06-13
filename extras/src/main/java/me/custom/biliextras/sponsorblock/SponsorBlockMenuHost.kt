@@ -1,5 +1,6 @@
 package me.custom.biliextras.sponsorblock
 
+import me.custom.biliextras.playback.PlayerMenuKind
 import me.custom.biliextras.utils.Log
 import me.custom.biliextras.utils.callMethodOrNull
 import java.lang.ref.WeakReference
@@ -10,6 +11,13 @@ object SponsorBlockMenuHost {
     @Volatile
     var isFullscreenWidget: Boolean = false
         private set
+    @Volatile
+    var playerMenuKind: PlayerMenuKind = PlayerMenuKind.UGC
+        private set
+
+    fun setPlayerMenuKind(kind: PlayerMenuKind) {
+        playerMenuKind = kind
+    }
 
     fun setFullscreenWidget(widget: Any) {
         widgetRef = WeakReference(widget)

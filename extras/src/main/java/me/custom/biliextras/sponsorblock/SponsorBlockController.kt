@@ -72,6 +72,7 @@ object SponsorBlockController {
             val ok = SponsorBlockApi.voteOnSponsorTime(uuid, type, category).getOrDefault(false)
             mainHandler.post {
                 if (ok) {
+                    SponsorBlockState.recordUserVote(uuid, type)
                     currentVideo?.let { SponsorBlockCache.invalidate(it.bvid, it.cid) }
                     refetchCurrent()
                 }

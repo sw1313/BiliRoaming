@@ -7,9 +7,11 @@ import me.custom.biliextras.utils.Log
 object SponsorBlockSegmentActionDialog {
     fun show(context: Context, segment: SponsorBlockState.SegmentView) {
         val categoryTitle = SponsorBlockCategory.titleOf(segment.category)
+        val voteLabel = SponsorBlockState.userVoteLabel(segment.uuid)
+        val titleSuffix = voteLabel?.let { " · $it" } ?: ""
         val items = arrayOf("赞成", "反对", "撤销投票", "更改类别")
         AlertDialog.Builder(context)
-            .setTitle("片段：$categoryTitle")
+            .setTitle("片段：$categoryTitle$titleSuffix")
             .setItems(items) { _, which ->
                 when (which) {
                     0 -> vote(context, segment, 1)
@@ -30,6 +32,7 @@ object SponsorBlockSegmentActionDialog {
                 val category = categories[which]
                 SponsorBlockController.vote(segment.uuid, 1, category.id) { ok ->
                     Log.toast(if (ok) "已更新类别" else "操作失败")
+                    if (ok) show(context, segment)
                 }
             }
             .show()
@@ -48,6 +51,7 @@ object SponsorBlockSegmentActionDialog {
                 else -> if (ok) "操作成功" else "操作失败"
             }
             Log.toast(msg)
+            if (ok) show(context, segment)
         }
     }
 }

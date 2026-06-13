@@ -13,7 +13,7 @@ public final class SponsorBlockSubmitActionHandler implements InvocationHandler 
     public static final int COMMIT = 4;
     /** subAction: 0=editStartMenu, 1=editEndMenu, 2=category, 3=remove, 4=addAnother */
     public static final int DRAFT_ACTION = 5;
-    /** subAction: 0=editTime, 1=category, 2=downvote, 3=unvote, 4=save, 5=unvote */
+    /** subAction: 0=start, 1=end, 2=category, 3=save, 4=downvote, 5=unvote, 6=upvote */
     public static final int EXISTING_ACTION = 6;
     /** draft time: subAction 0=current, 1=begin/end, 2=manual; timeField 0=start, 1=end */
     public static final int TIME_ACTION = 7;

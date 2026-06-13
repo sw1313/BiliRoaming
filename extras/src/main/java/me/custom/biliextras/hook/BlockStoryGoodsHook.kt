@@ -10,8 +10,12 @@ import java.util.concurrent.ConcurrentHashMap
 
 class BlockStoryGoodsHook(classLoader: ClassLoader) : BaseHook(classLoader) {
     companion object {
-        private val widgetControllerFieldCache = ConcurrentHashMap<Class<*>, Field?>()
-        private val controllerCartMethodsCache = ConcurrentHashMap<Class<*>, ControllerCartMethods?>()
+        private val widgetControllerFieldCache = ConcurrentHashMap<Class<*>, Field>()
+        /** Widget classes already scanned with no resolvable controller field. */
+        private val widgetControllerFieldMiss = ConcurrentHashMap.newKeySet<Class<*>>()
+        private val controllerCartMethodsCache = ConcurrentHashMap<Class<*>, ControllerCartMethods>()
+        /** Controller classes whose cart accessor chain could not be resolved. */
+        private val controllerCartMethodsMiss = ConcurrentHashMap.newKeySet<Class<*>>()
     }
 
     private data class ControllerCartMethods(
@@ -167,42 +171,50 @@ class BlockStoryGoodsHook(classLoader: ClassLoader) : BaseHook(classLoader) {
 
     private fun controllerField(widget: Any): Field? {
         val widgetClass = widget.javaClass
-        if (widgetControllerFieldCache.containsKey(widgetClass)) {
-            return widgetControllerFieldCache[widgetClass]
-        }
+        if (widgetClass in widgetControllerFieldMiss) return null
+        widgetControllerFieldCache[widgetClass]?.let { return it }
         for (field in widgetClass.declaredFields) {
             if (readCartInfoFromField(widget, field) != null) {
                 widgetControllerFieldCache[widgetClass] = field
                 return field
             }
         }
-        widgetControllerFieldCache[widgetClass] = null
+        widgetControllerFieldMiss.add(widgetClass)
         return null
     }
 
     private fun readCartInfoFromField(widget: Any, field: Field): CartInfo? = runCatching {
         field.isAccessible = true
         val controller = field.get(widget) ?: return@runCatching null
-        val methods = controllerCartMethodsCache.getOrPut(controller.javaClass) {
-            runCatching {
-                ControllerCartMethods(
-                    getData = controller.javaClass.getMethod("getData").also { it.isAccessible = true },
-                    getCartIconInfo = controller.javaClass.getMethod("getCartIconInfo")
-                        .also { it.isAccessible = true },
-                    getEntryGoto = controller.javaClass.getMethod("getEntryGoto")
-                        .also { it.isAccessible = true },
-                    getEntryText = runCatching {
-                        controller.javaClass.getMethod("getEntryText").also { it.isAccessible = true }
-                    }.getOrNull(),
-                )
-            }.getOrNull()
-        } ?: return@runCatching null
+        val methods = cartMethodsFor(controller) ?: return@runCatching null
         val data = methods.getData.invoke(controller) ?: return@runCatching null
         val cartInfo = methods.getCartIconInfo.invoke(data) ?: return@runCatching null
         val goto = methods.getEntryGoto.invoke(cartInfo) as? String ?: return@runCatching null
         val text = methods.getEntryText?.invoke(cartInfo) as? String
         CartInfo(goto, text)
     }.getOrNull()
+
+    private fun cartMethodsFor(controller: Any): ControllerCartMethods? {
+        val clazz = controller.javaClass
+        if (clazz in controllerCartMethodsMiss) return null
+        controllerCartMethodsCache[clazz]?.let { return it }
+        val methods = runCatching {
+            ControllerCartMethods(
+                getData = clazz.getMethod("getData").also { it.isAccessible = true },
+                getCartIconInfo = clazz.getMethod("getCartIconInfo").also { it.isAccessible = true },
+                getEntryGoto = clazz.getMethod("getEntryGoto").also { it.isAccessible = true },
+                getEntryText = runCatching {
+                    clazz.getMethod("getEntryText").also { it.isAccessible = true }
+                }.getOrNull(),
+            )
+        }.getOrNull()
+        if (methods != null) {
+            controllerCartMethodsCache[clazz] = methods
+        } else {
+            controllerCartMethodsMiss.add(clazz)
+        }
+        return methods
+    }
 
     /**
      * 番剧/电影「影视溯源胶片卡」root-cause block. The visible "<类型> | <片名>" chip (e.g.

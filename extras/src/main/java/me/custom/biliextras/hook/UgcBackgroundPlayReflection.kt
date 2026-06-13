@@ -46,6 +46,19 @@ internal object UgcBackgroundPlayReflection {
         fields(service).repo.get(service)
     }.getOrNull()
 
+    /** Current playback anchor on [PageBackgroundPlayRepository] (field `i`). */
+    fun anchor(repo: Any): Any? = runCatching {
+        repo.javaClass.getDeclaredField("i").apply { isAccessible = true }.get(repo)
+    }.getOrNull()
+
+    fun sessionId(repo: Any): String? = runCatching {
+        repo.javaClass.getDeclaredField("g").apply { isAccessible = true }.get(repo) as? String
+    }.getOrNull()?.takeIf { it.isNotBlank() }
+
+    fun peekDisplayId(repo: Any): Long = runCatching {
+        repo.javaClass.getDeclaredField("f").apply { isAccessible = true }.get(repo) as Long
+    }.getOrDefault(1L)
+
     fun context(service: Any): Any? = runCatching {
         fields(service).context.get(service)
     }.getOrNull()
@@ -115,6 +128,10 @@ internal object UgcBackgroundPlayReflection {
 
     fun rawAiAvids(service: Any): List<Long> = runCatching {
         val repo = repo(service) ?: return@runCatching emptyList<Long>()
+        rawAiAvidsFromRepo(repo)
+    }.getOrDefault(emptyList())
+
+    fun rawAiAvidsFromRepo(repo: Any): List<Long> = runCatching {
         val size = repo.javaClass.getMethod("m").invoke(repo) as Int
         val cur = repo.javaClass.getMethod("q").invoke(repo) as Int
         if (size <= 0 || cur + 1 >= size) return@runCatching emptyList<Long>()
