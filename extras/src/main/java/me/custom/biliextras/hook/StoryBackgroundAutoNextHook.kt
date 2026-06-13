@@ -69,12 +69,16 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
         @Volatile
         var trackedIndex = -1
 
-        /** Story host class when [trackedIndex] was last valid (main feed vs UP space). */
+        /** Active story host; used only to detect main-feed -> UP-space navigation. */
         @Volatile
         var trackedIndexHost: String? = null
 
-        private const val HOST_MAIN = "com.bilibili.video.story.StoryVideoFragment"
-        private const val HOST_SPACE = "com.bilibili.video.story.space.StorySpaceFragment"
+        /** Engine index from background auto-next; kept until pager D1 catches up. */
+        @Volatile
+        var liveEngineIndex = -1
+
+        internal const val HOST_MAIN = "com.bilibili.video.story.StoryVideoFragment"
+        internal const val HOST_SPACE = "com.bilibili.video.story.space.StorySpaceFragment"
 
         @Volatile
         var backgroundLoadActive = false
@@ -100,14 +104,6 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
         // Live instance so MediaButtonControlHook can drive next/previous on demand.
         @Volatile
         var liveInstance: StoryBackgroundAutoNextHook? = null
-
-        /** Set on background pause; enables end-of-play scroll assist after the next w2 resume. */
-        @Volatile
-        var pendingForegroundAssist = false
-
-        /** After resume, keep assisting end-of-play scroll until the next background pause. */
-        @Volatile
-        var foregroundEndAssist = false
 
         @Volatile
         var foregroundSeekRunnable: Runnable? = null
@@ -140,35 +136,6 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
             if (method != null) storyMethodCache[key] = method
             return method
         }
-
-        /**
-         * Main story feed and UP-space story share one [StoryPagerPlayer] but separate lists.
-         * [trackedIndex] from one feed must not drive foreground sync on the other.
-         */
-        internal fun reconcileTrackedIndexForHost(hostName: String?, player: Any) {
-            if (hostName !in setOf(HOST_MAIN, HOST_SPACE)) return
-            val prev = trackedIndexHost
-            if (prev != null && prev != hostName) {
-                val d1 = player.readPagerIndex()
-                trackedIndex = d1
-                backgroundEngineIndex = -1
-                backgroundEngineMoved = false
-                tailWaitKey = null
-                foregroundEndAssist = false
-                Log.x("StoryAutoNext: host switch $prev -> $hostName, trackedIndex=$d1")
-            }
-            trackedIndexHost = hostName
-        }
-
-        private fun Any.readPagerIndex(): Int {
-            val clazz = javaClass
-            listOf("D1", "getIndex").forEach { name ->
-                val method = clazz.cachedStoryMethod(name) ?: return@forEach
-                val value = runCatching { method.invoke(this) as? Number }.getOrNull()
-                if (value != null) return value.toInt()
-            }
-            return -1
-        }
     }
 
     override fun startHook() {
@@ -189,7 +156,6 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
             ensurePolling()
             Log.x("StoryAutoNext: auto-next ON (background loop off, polling=$polling)")
         } else {
-            foregroundEndAssist = false
             Log.x("StoryAutoNext: auto-next OFF (single loop restored)")
         }
     }
@@ -383,15 +349,22 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
             Class.forName("com.bilibili.video.story.action.f", false, mClassLoader)
         }.getOrNull() ?: return
         playerClass.hookMethod("I2", actionHostClass) { chain ->
-            val result = chain.proceed()
-            val host = chain.args.firstOrNull() ?: return@hookMethod result
-            val hostName = host.javaClass.name
-            if (hostName in setOf(HOST_MAIN, HOST_SPACE)) {
-                activeStoryHost = host
-                reconcileTrackedIndexForHost(hostName, chain.thisObject)
-            }
-            if (hostName in setOf(HOST_MAIN, HOST_SPACE) && cachedAppContext == null
+            val player = chain.thisObject
+            val host = chain.args.firstOrNull()
+            val prevHost = trackedIndexHost
+            if (host != null && host.javaClass.name == HOST_SPACE &&
+                (prevHost == HOST_MAIN || prevHost == null)
             ) {
+                // Background auto-next advances the engine while D1 stays 0; Bilibili opens UP
+                // space for the pager item unless we align D1 to the engine first.
+                player.ensurePagerAlignedForNavigation()
+            }
+            val result = chain.proceed()
+            if (host != null && host.javaClass.name in setOf(HOST_MAIN, HOST_SPACE)) {
+                activeStoryHost = host
+                trackedIndexHost = host.javaClass.name
+            }
+            if (host != null && host.javaClass.name in setOf(HOST_MAIN, HOST_SPACE) && cachedAppContext == null) {
                 runCatching {
                     val ctx = host.javaClass.getMethod("getContext").invoke(host) as? Context
                     cachedAppContext = ctx?.applicationContext
@@ -416,9 +389,29 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
     }
 
     /**
-     * When returning to foreground (Q2 sets state to 3), the video rendering
-     * surface is disconnected because x2() was never called (i3 returns early
-     * if player exists). Post x2(true) after layout to reconnect video output.
+     * When the engine ran ahead in background (D1 still 0), align ViewPager2 before in-app
+     * navigation (e.g. opening UP space) so Bilibili picks the currently playing video.
+     */
+    private fun Any.ensurePagerAlignedForNavigation(): Boolean = runCatching {
+        val d1 = invokeIntGetter("D1", "getIndex") ?: -1
+        val target = trackedIndex
+            .coerceAtLeast(liveEngineIndex)
+            .coerceAtLeast(backgroundEngineIndex)
+        if (target <= d1 || target < 0) return@runCatching false
+        val count = invokeIntGetter("N1") ?: return@runCatching false
+        if (target !in 0 until count) return@runCatching false
+        callPagerScroll(target, smooth = false)
+        trackedIndex = target
+        if (d1 >= target) liveEngineIndex = d1
+        Log.x("StoryAutoNext: align pager for navigation d1=$d1 -> $target")
+        true
+    }.getOrElse {
+        Log.e(it)
+        false
+    }
+
+    /**
+     * Background pause/resume hooks: only touch loop mode and post-background pager catch-up.
      */
     private fun hookForegroundSync(playerClass: Class<*>) {
         val u2PauseMethod = playerClass.declaredMethods.firstOrNull {
@@ -427,23 +420,14 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
         if (u2PauseMethod != null) {
             u2PauseMethod.hookMethod { chain ->
                 val player = chain.thisObject
+                val enteringBackground = !isInBackground
                 isInBackground = true
-                foregroundEndAssist = false
-                pendingForegroundAssist = false
-                backgroundEngineMoved = false
-                backgroundEngineIndex = -1
-                player.resolveStoryHostFromPlayer()?.let { host ->
-                    activeStoryHost = host
-                    reconcileTrackedIndexForHost(host.javaClass.name, player)
-                }
-                // D1() reads ViewPager2.getCurrentItem(); valid on onPause, authoritative here.
-                val pagerIdx = player.invokeIntGetter("D1", "getIndex") ?: -1
-                if (pagerIdx >= 0 && (trackedIndex < 0 || pagerIdx > trackedIndex)) {
-                    trackedIndex = pagerIdx
+                if (enteringBackground) {
+                    backgroundEngineMoved = false
+                    backgroundEngineIndex = -1
                 }
                 if (isAutoNextEnabled()) {
                     applyBackgroundLoopMode(player, autoNext = true)
-                    pendingForegroundAssist = true
                 } else {
                     applyBackgroundLoopMode(player, autoNext = false)
                 }
@@ -457,53 +441,45 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
         if (w2ResumeMethod != null) {
             w2ResumeMethod.hookMethod { chain ->
                 val player = chain.thisObject
-                player.resolveStoryHostFromPlayer()?.let { host ->
-                    activeStoryHost = host
-                    reconcileTrackedIndexForHost(host.javaClass.name, player)
-                }
-                val pagerIndex = player.invokeIntGetter("D1", "getIndex") ?: -1
                 val engineMoved = backgroundEngineMoved
-                // backgroundEngineIndex is set on each engine h2(); D1() stays 0 in background so
-                // trackedIndex alone is unreliable after loadMore h1() (reconcile used to zero it).
                 val syncIndex = when {
-                    backgroundEngineIndex >= 0 -> backgroundEngineIndex
-                    trackedIndex >= 0 -> trackedIndex
+                    engineMoved && backgroundEngineIndex >= 0 -> backgroundEngineIndex
+                    engineMoved && trackedIndex >= 0 -> trackedIndex
                     else -> -1
                 }
-                val savedPos = liveStoryPlayerCore()
-                    ?.invokeLongGetter("getCurrentPosition", "getRealCurrentPosition") ?: 0L
-                val targetId = if (syncIndex >= 0) storyIdentityAt(syncIndex) else null
-                Log.x(
-                    "StoryAutoNext: foreground capture savedPos=$savedPos id=$targetId " +
-                        "syncIndex=$syncIndex pager=$pagerIndex engineIdx=$backgroundEngineIndex moved=$engineMoved",
-                )
-                isInBackground = false
-                if (isAutoNextEnabled() && pendingForegroundAssist) {
-                    foregroundEndAssist = true
+                val savedPos = if (engineMoved) {
+                    liveStoryPlayerCore()
+                        ?.invokeLongGetter("getCurrentPosition", "getRealCurrentPosition") ?: 0L
+                } else {
+                    0L
                 }
-                pendingForegroundAssist = false
+                val targetId = if (syncIndex >= 0) storyIdentityAt(syncIndex) else null
+                if (engineMoved) {
+                    Log.x(
+                        "StoryAutoNext: bg resume syncIndex=$syncIndex pager=" +
+                            "${player.invokeIntGetter("D1", "getIndex")} engineIdx=$backgroundEngineIndex",
+                    )
+                }
+                isInBackground = false
                 chain.proceed()
-                val count = player.invokeIntGetter("N1") ?: 0
-                val pagerAfter = player.invokeIntGetter("D1", "getIndex") ?: pagerIndex
+                if (engineMoved && syncIndex >= 0 && isAutoNextEnabled()) {
+                    val count = player.invokeIntGetter("N1") ?: 0
+                    val pagerAfter = player.invokeIntGetter("D1", "getIndex") ?: -1
+                    if (syncIndex in 0 until count && pagerAfter != syncIndex) {
+                        runCatching {
+                            player.syncForegroundPagerToIndex(syncIndex, savedPos, targetId)
+                        }.onFailure { Log.e(it) }
+                    } else if (savedPos > 0L) {
+                        player.setNativeStartPosition(savedPos)
+                        scheduleForegroundSeek(savedPos, targetId, nativeSeeded = true)
+                    }
+                    liveEngineIndex = syncIndex
+                }
                 backgroundEngineMoved = false
                 backgroundEngineIndex = -1
-                val needsPagerSync = syncIndex >= 0 && syncIndex in 0 until count &&
-                    (engineMoved || pagerAfter != syncIndex)
-                if (needsPagerSync) {
-                    runCatching {
-                        player.syncForegroundPagerToIndex(syncIndex, savedPos, targetId)
-                    }.onFailure { Log.e(it) }
-                } else if (syncIndex >= 0) {
-                    trackedIndex = syncIndex
-                } else if (pagerAfter >= 0) {
-                    trackedIndex = pagerAfter
-                }
                 hookRuntimeTargets(player)
-                if (needsPagerSync) {
-                    Log.x("StoryAutoNext: foreground pager sync index=$syncIndex pagerBefore=$pagerIndex pagerAfter=$pagerAfter moved=$engineMoved")
-                }
             }
-            Log.x("StoryAutoNext: hooked ${playerClass.name}.w2 for foreground sync")
+            Log.x("StoryAutoNext: hooked ${playerClass.name}.w2 for background pager catch-up")
         }
     }
 
@@ -896,16 +872,10 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
         if (now - lastNextAtMs < NEXT_COOLDOWN_MS) return
         Log.x(
             "StoryAutoNext: playback ended key=$activeStoryKey, position=$position, duration=$duration, " +
-                "core=${core.javaClass.name}#${System.identityHashCode(core)} bg=$isInBackground assist=$foregroundEndAssist",
+                "core=${core.javaClass.name}#${System.identityHashCode(core)} bg=$isInBackground",
         )
-        val advanced = if (isInBackground) {
-            triggerNextStory()
-        } else if (foregroundEndAssist) {
-            triggerForegroundScroll(forward = true)
-        } else {
-            false
-        }
-        if (advanced) {
+        if (!isInBackground) return
+        if (triggerNextStory()) {
             lastNextAtMs = now
         }
     }
@@ -947,6 +917,7 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
             trackedIndex = nextIndex
             backgroundEngineIndex = nextIndex
             backgroundEngineMoved = true
+            liveEngineIndex = nextIndex
             Log.x("StoryAutoNext: advanced engine to index=$nextIndex (d1=$d1 engineIdx=$backgroundEngineIndex)")
         }
         return moved
