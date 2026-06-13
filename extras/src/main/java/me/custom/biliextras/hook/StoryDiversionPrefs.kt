@@ -27,6 +27,7 @@ object StoryDiversionPrefs {
     const val KEY_OGV_BANGUMI = "block_story_ogv_bangumi"
     const val KEY_OGV_MOVIE = "block_story_ogv_movie"
     const val KEY_CHARGE_ENTRY = "block_story_charge_entry"
+    const val KEY_CONSULT = "block_diversion_consult"
 
     val gotoEntries = listOf(
         Entry("block_diversion_cart", "购物 / 视频同款 / 立即购买", "购物", setOf("cart", "anchor_nature")),
@@ -38,6 +39,12 @@ object StoryDiversionPrefs {
             setOf("vip"),
         ),
         Entry("block_diversion_ad", "广告推广入口", "广告", setOf("ad", "anchor_ad")),
+        Entry(
+            KEY_CONSULT,
+            "咨询 / 课程推广入口（如「咨询 | 程序员一定要学的 AI 课程」）",
+            "咨询",
+            setOf("consult", "clue", "form", "landing"),
+        ),
         Entry("block_diversion_topic", "话题入口", "话题", setOf("topic_new", "topic")),
         Entry("block_diversion_music", "音乐入口", "音乐", setOf("music_new", "music")),
         Entry("block_diversion_btool", "智能成片 / 一键生成大片入口", "智能成片", setOf("b_tool")),
@@ -106,10 +113,17 @@ object StoryDiversionPrefs {
 
     /**
      * Union of entryText keyword labels to hide on the diversion chip (StoryDiversionEntryWidget):
-     * the enabled 番剧/电影「影视溯源胶片卡」plus the 充电 entry. Matched against cartIconInfo.entryText.
+     * the enabled 番剧/电影「影视溯源胶片卡」plus the 充电 entry, plus 咨询 when [KEY_CONSULT] is on.
+     * Matched against cartIconInfo.entryText.
      */
-    fun blockedTextLabels(): Set<String> =
-        (ogvSeasonEntries + textEntries).filter { isBlocked(it.key) }.flatMap { it.gotos }.toSet()
+    fun blockedTextLabels(): Set<String> {
+        val labels = (ogvSeasonEntries + textEntries)
+            .filter { isBlocked(it.key) }
+            .flatMap { it.gotos }
+            .toMutableSet()
+        if (isBlocked(KEY_CONSULT)) labels.add("咨询")
+        return labels
+    }
 
     /** Short labels of the currently-blocked items, for the settings summary. */
     fun blockedShortTitles(): List<String> =

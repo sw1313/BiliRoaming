@@ -69,6 +69,13 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
         @Volatile
         var trackedIndex = -1
 
+        /** Story host class when [trackedIndex] was last valid (main feed vs UP space). */
+        @Volatile
+        var trackedIndexHost: String? = null
+
+        private const val HOST_MAIN = "com.bilibili.video.story.StoryVideoFragment"
+        private const val HOST_SPACE = "com.bilibili.video.story.space.StorySpaceFragment"
+
         @Volatile
         var backgroundLoadActive = false
 
@@ -93,6 +100,14 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
         // Live instance so MediaButtonControlHook can drive next/previous on demand.
         @Volatile
         var liveInstance: StoryBackgroundAutoNextHook? = null
+
+        /** Set on background pause; enables end-of-play scroll assist after the next w2 resume. */
+        @Volatile
+        var pendingForegroundAssist = false
+
+        /** After resume, keep assisting end-of-play scroll until the next background pause. */
+        @Volatile
+        var foregroundEndAssist = false
 
         @Volatile
         var foregroundSeekRunnable: Runnable? = null
@@ -125,6 +140,35 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
             if (method != null) storyMethodCache[key] = method
             return method
         }
+
+        /**
+         * Main story feed and UP-space story share one [StoryPagerPlayer] but separate lists.
+         * [trackedIndex] from one feed must not drive foreground sync on the other.
+         */
+        internal fun reconcileTrackedIndexForHost(hostName: String?, player: Any) {
+            if (hostName !in setOf(HOST_MAIN, HOST_SPACE)) return
+            val prev = trackedIndexHost
+            if (prev != null && prev != hostName) {
+                val d1 = player.readPagerIndex()
+                trackedIndex = d1
+                backgroundEngineIndex = -1
+                backgroundEngineMoved = false
+                tailWaitKey = null
+                foregroundEndAssist = false
+                Log.x("StoryAutoNext: host switch $prev -> $hostName, trackedIndex=$d1")
+            }
+            trackedIndexHost = hostName
+        }
+
+        private fun Any.readPagerIndex(): Int {
+            val clazz = javaClass
+            listOf("D1", "getIndex").forEach { name ->
+                val method = clazz.cachedStoryMethod(name) ?: return@forEach
+                val value = runCatching { method.invoke(this) as? Number }.getOrNull()
+                if (value != null) return value.toInt()
+            }
+            return -1
+        }
     }
 
     override fun startHook() {
@@ -145,6 +189,7 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
             ensurePolling()
             Log.x("StoryAutoNext: auto-next ON (background loop off, polling=$polling)")
         } else {
+            foregroundEndAssist = false
             Log.x("StoryAutoNext: auto-next OFF (single loop restored)")
         }
     }
@@ -341,17 +386,11 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
             val result = chain.proceed()
             val host = chain.args.firstOrNull() ?: return@hookMethod result
             val hostName = host.javaClass.name
-            if (hostName in setOf(
-                    "com.bilibili.video.story.StoryVideoFragment",
-                    "com.bilibili.video.story.space.StorySpaceFragment",
-                )
-            ) {
+            if (hostName in setOf(HOST_MAIN, HOST_SPACE)) {
                 activeStoryHost = host
+                reconcileTrackedIndexForHost(hostName, chain.thisObject)
             }
-            if (hostName in setOf(
-                    "com.bilibili.video.story.StoryVideoFragment",
-                    "com.bilibili.video.story.space.StorySpaceFragment",
-                ) && cachedAppContext == null
+            if (hostName in setOf(HOST_MAIN, HOST_SPACE) && cachedAppContext == null
             ) {
                 runCatching {
                     val ctx = host.javaClass.getMethod("getContext").invoke(host) as? Context
@@ -389,8 +428,14 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
             u2PauseMethod.hookMethod { chain ->
                 val player = chain.thisObject
                 isInBackground = true
+                foregroundEndAssist = false
+                pendingForegroundAssist = false
                 backgroundEngineMoved = false
                 backgroundEngineIndex = -1
+                player.resolveStoryHostFromPlayer()?.let { host ->
+                    activeStoryHost = host
+                    reconcileTrackedIndexForHost(host.javaClass.name, player)
+                }
                 // D1() reads ViewPager2.getCurrentItem(); valid on onPause, authoritative here.
                 val pagerIdx = player.invokeIntGetter("D1", "getIndex") ?: -1
                 if (pagerIdx >= 0 && (trackedIndex < 0 || pagerIdx > trackedIndex)) {
@@ -398,6 +443,7 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
                 }
                 if (isAutoNextEnabled()) {
                     applyBackgroundLoopMode(player, autoNext = true)
+                    pendingForegroundAssist = true
                 } else {
                     applyBackgroundLoopMode(player, autoNext = false)
                 }
@@ -411,6 +457,10 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
         if (w2ResumeMethod != null) {
             w2ResumeMethod.hookMethod { chain ->
                 val player = chain.thisObject
+                player.resolveStoryHostFromPlayer()?.let { host ->
+                    activeStoryHost = host
+                    reconcileTrackedIndexForHost(host.javaClass.name, player)
+                }
                 val pagerIndex = player.invokeIntGetter("D1", "getIndex") ?: -1
                 val engineMoved = backgroundEngineMoved
                 // backgroundEngineIndex is set on each engine h2(); D1() stays 0 in background so
@@ -428,18 +478,29 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
                         "syncIndex=$syncIndex pager=$pagerIndex engineIdx=$backgroundEngineIndex moved=$engineMoved",
                 )
                 isInBackground = false
+                if (isAutoNextEnabled() && pendingForegroundAssist) {
+                    foregroundEndAssist = true
+                }
+                pendingForegroundAssist = false
                 chain.proceed()
+                val count = player.invokeIntGetter("N1") ?: 0
+                val pagerAfter = player.invokeIntGetter("D1", "getIndex") ?: pagerIndex
                 backgroundEngineMoved = false
                 backgroundEngineIndex = -1
-                if (engineMoved && syncIndex >= 0) {
-                    val count = player.invokeIntGetter("N1") ?: 0
-                    if (syncIndex in 0 until count) {
-                        runCatching {
-                            player.syncForegroundPagerToIndex(syncIndex, savedPos, targetId)
-                        }.onFailure { Log.e(it) }
-                    } else {
-                        Log.x("StoryAutoNext: skip F2 syncIndex=$syncIndex out of count=$count")
-                    }
+                val needsPagerSync = syncIndex >= 0 && syncIndex in 0 until count &&
+                    (engineMoved || pagerAfter != syncIndex)
+                if (needsPagerSync) {
+                    runCatching {
+                        player.syncForegroundPagerToIndex(syncIndex, savedPos, targetId)
+                    }.onFailure { Log.e(it) }
+                } else if (syncIndex >= 0) {
+                    trackedIndex = syncIndex
+                } else if (pagerAfter >= 0) {
+                    trackedIndex = pagerAfter
+                }
+                hookRuntimeTargets(player)
+                if (needsPagerSync) {
+                    Log.x("StoryAutoNext: foreground pager sync index=$syncIndex pagerBefore=$pagerIndex pagerAfter=$pagerAfter moved=$engineMoved")
                 }
             }
             Log.x("StoryAutoNext: hooked ${playerClass.name}.w2 for foreground sync")
@@ -825,7 +886,6 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
 
     private fun checkPlaybackEndAndNext() {
         if (!isAutoNextEnabled()) return
-        if (!isInBackground) return
         // Prefer StoryPlayer's live core; activePlayerCore from graph scan can be a stale wrapper.
         val core = liveStoryPlayerCore() ?: activePlayerCore ?: return
         val position = core.invokeLongGetter("getCurrentPosition", "getRealCurrentPosition") ?: return
@@ -836,9 +896,16 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
         if (now - lastNextAtMs < NEXT_COOLDOWN_MS) return
         Log.x(
             "StoryAutoNext: playback ended key=$activeStoryKey, position=$position, duration=$duration, " +
-                "core=${core.javaClass.name}#${System.identityHashCode(core)}",
+                "core=${core.javaClass.name}#${System.identityHashCode(core)} bg=$isInBackground assist=$foregroundEndAssist",
         )
-        if (triggerNextStory()) {
+        val advanced = if (isInBackground) {
+            triggerNextStory()
+        } else if (foregroundEndAssist) {
+            triggerForegroundScroll(forward = true)
+        } else {
+            false
+        }
+        if (advanced) {
             lastNextAtMs = now
         }
     }
@@ -888,16 +955,19 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
         false
     }
 
-    private fun Any.callOfficialStoryLoadMore(index: Int, force: Boolean): Boolean = runCatching {
+    private fun Any.resolveStoryHostFromPlayer(): Any? = runCatching {
         val hostFromPlayer = runCatching {
-            val fField = javaClass.declaredFields.firstOrNull { it.name == "F" }
-            fField?.isAccessible = true
-            fField?.get(this)
+            javaClass.declaredFields.firstOrNull { it.name == "F" }
+                ?.also { it.isAccessible = true }
+                ?.get(this)
         }.getOrNull()
-        var host = hostFromPlayer?.takeIf { it.isStoryHost() }
+        hostFromPlayer?.takeIf { it.isStoryHost() }
             ?: activeStoryHost?.takeIf { it.isStoryHost() }
             ?: findStoryHost()
-            ?: return@runCatching false
+    }.getOrNull()
+
+    private fun Any.callOfficialStoryLoadMore(index: Int, force: Boolean): Boolean = runCatching {
+        var host = resolveStoryHostFromPlayer() ?: return@runCatching false
         val now = System.currentTimeMillis()
         if (!force && now - lastLoadMoreAtMs < LOAD_MORE_COOLDOWN_MS) return@runCatching false
         backgroundLoadActive = true
@@ -1301,8 +1371,7 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
     }
 
     private fun Any.isStoryHost(): Boolean =
-        javaClass.name == "com.bilibili.video.story.StoryVideoFragment" ||
-            javaClass.name == "com.bilibili.video.story.space.StorySpaceFragment"
+        javaClass.name == HOST_MAIN || javaClass.name == HOST_SPACE
 
     private fun Any.storyIdentity(): String {
         val bvid = runCatching {

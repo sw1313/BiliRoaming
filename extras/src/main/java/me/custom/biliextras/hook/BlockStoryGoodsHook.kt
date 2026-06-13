@@ -20,9 +20,6 @@ class BlockStoryGoodsHook(classLoader: ClassLoader) : BaseHook(classLoader) {
 
     private data class ControllerCartMethods(
         val getData: Method,
-        val getCartIconInfo: Method,
-        val getEntryGoto: Method,
-        val getEntryText: Method?,
     )
     override fun startHook() {
         val blockedGotos = StoryDiversionPrefs.blockedGotos()
@@ -47,6 +44,7 @@ class BlockStoryGoodsHook(classLoader: ClassLoader) : BaseHook(classLoader) {
         if (freeData) blockStoryFreeDataPrompt()
         if (ogvKeywords.isNotEmpty()) blockOgvCollection(ogvKeywords)
         if (blockedGotos.isNotEmpty() || textLabels.isNotEmpty()) {
+            blockCartIconInfo(blockedGotos, textLabels)
             blockStoryDiversionEntry(blockedGotos, textLabels)
         }
         Log.s(
@@ -105,7 +103,7 @@ class BlockStoryGoodsHook(classLoader: ClassLoader) : BaseHook(classLoader) {
      * content/visibility is driven entirely by z0() (called only from O(StoryActionType.ALL)),
      * which reads the current StoryDetail's cartIconInfo. cartIconInfo.entryGoto decides what the
      * entry is: "cart"/"anchor_nature" (购物), "game" (游戏), "ogv" (番剧), "vip" (大会员),
-     * "ad"/"anchor_ad" (广告). For "cart" z0() hides this chip and spawns the floating
+     * "ad"/"anchor_ad" (广告), "consult"/"clue"/"form" (咨询 / 课程推广). For "cart" z0() hides this chip and spawns the floating
      * "购物 / 视频同款 / 立即购买" card through the ad route service (d.e(...)).
      *
      * The "话题 / 音乐" tags are a SEPARATE widget and are never touched here.
@@ -134,12 +132,7 @@ class BlockStoryGoodsHook(classLoader: ClassLoader) : BaseHook(classLoader) {
             "com.bilibili.video.story.action.j",
         ) { chain ->
             val info = currentCartInfo(chain.thisObject)
-            val goto = info?.goto
-            val blocked = when {
-                goto == null -> false
-                textLabels.isNotEmpty() && textLabels.any { info.text.orEmpty().contains(it) } -> true
-                else -> goto in blockedGotos
-            }
+            val blocked = shouldBlockDiversionEntry(info?.goto, info?.text, blockedGotos, textLabels)
             if (blocked) {
                 (chain.thisObject as? View)?.visibility = View.GONE
                 null
@@ -152,6 +145,42 @@ class BlockStoryGoodsHook(classLoader: ClassLoader) : BaseHook(classLoader) {
 
     private data class CartInfo(val goto: String?, val text: String?)
 
+    private fun shouldBlockDiversionEntry(
+        goto: String?,
+        text: String?,
+        blockedGotos: Set<String>,
+        textLabels: Set<String>,
+    ): Boolean {
+        if (goto == null) return false
+        if (textLabels.isNotEmpty() && textLabels.any { text.orEmpty().contains(it) }) return true
+        return goto in blockedGotos
+    }
+
+    /**
+     * Root-cause block for the bottom-left diversion chip. StoryDiversionEntryWidget.z0() reads
+     * StoryDetail.getCartIconInfo() directly; nulling blocked entries hides the widget before render.
+     */
+    private fun blockCartIconInfo(blockedGotos: Set<String>, textLabels: Set<String>) {
+        val storyDetail = "com.bilibili.video.story.StoryDetail".findClassOrNull(mClassLoader) ?: run {
+            Log.x("BlockStoryGoods: StoryDetail not found (getCartIconInfo)")
+            return
+        }
+        var mGetEntryGoto: Method? = null
+        var mGetEntryText: Method? = null
+        val handle = storyDetail.hookMethod("getCartIconInfo") { chain ->
+            val info = chain.proceed() ?: return@hookMethod null
+            if (mGetEntryGoto == null) {
+                val c = info.javaClass
+                mGetEntryGoto = runCatching { c.getMethod("getEntryGoto").also { it.isAccessible = true } }.getOrNull()
+                mGetEntryText = runCatching { c.getMethod("getEntryText").also { it.isAccessible = true } }.getOrNull()
+            }
+            val goto = runCatching { mGetEntryGoto?.invoke(info) as? String }.getOrNull()
+            val text = runCatching { mGetEntryText?.invoke(info) as? String }.getOrNull()
+            if (shouldBlockDiversionEntry(goto, text, blockedGotos, textLabels)) null else info
+        }
+        Log.x("BlockStoryGoods: hooked StoryDetail.getCartIconInfo -> ${handle != null}")
+    }
+
     /**
      * Reads the diversion widget's bound controller -> StoryDetail -> cartIconInfo, returning its
      * entryGoto/entryText.
@@ -159,8 +188,8 @@ class BlockStoryGoodsHook(classLoader: ClassLoader) : BaseHook(classLoader) {
      * The controller field's declared type is the obfuscated interface com.bilibili.video.story
      * .action.h, but its single-letter obfuscated name can differ between Bilibili builds, so we
      * do NOT match by type name. Instead we duck-type: scan every declared field and try the
-     * getData()/getCartIconInfo()/getEntryGoto() accessor chain (these names are stable / kept).
-     * The concrete controller impl is a non-public class, so each method needs setAccessible(true)
+     * getData()/getCartIconInfo()/getEntryGoto() accessor chain (getCartIconInfo lives on StoryDetail,
+     * not the controller). The concrete controller impl is a non-public class, so each method needs setAccessible(true)
      * before invoke() or reflection throws IllegalAccessException. Returns null when nothing
      * resolves (never blocking an unknown entry).
      */
@@ -186,11 +215,21 @@ class BlockStoryGoodsHook(classLoader: ClassLoader) : BaseHook(classLoader) {
     private fun readCartInfoFromField(widget: Any, field: Field): CartInfo? = runCatching {
         field.isAccessible = true
         val controller = field.get(widget) ?: return@runCatching null
-        val methods = cartMethodsFor(controller) ?: return@runCatching null
-        val data = methods.getData.invoke(controller) ?: return@runCatching null
-        val cartInfo = methods.getCartIconInfo.invoke(data) ?: return@runCatching null
-        val goto = methods.getEntryGoto.invoke(cartInfo) as? String ?: return@runCatching null
-        val text = methods.getEntryText?.invoke(cartInfo) as? String
+        val getData = cartMethodsFor(controller)?.getData ?: return@runCatching null
+        val data = getData.invoke(controller) ?: return@runCatching null
+        val detailClass = data.javaClass
+        val cartInfo = detailClass.getMethod("getCartIconInfo")
+            .also { it.isAccessible = true }
+            .invoke(data) ?: return@runCatching null
+        val cartClass = cartInfo.javaClass
+        val goto = cartClass.getMethod("getEntryGoto")
+            .also { it.isAccessible = true }
+            .invoke(cartInfo) as? String ?: return@runCatching null
+        val text = runCatching {
+            cartClass.getMethod("getEntryText")
+                .also { it.isAccessible = true }
+                .invoke(cartInfo) as? String
+        }.getOrNull()
         CartInfo(goto, text)
     }.getOrNull()
 
@@ -201,11 +240,6 @@ class BlockStoryGoodsHook(classLoader: ClassLoader) : BaseHook(classLoader) {
         val methods = runCatching {
             ControllerCartMethods(
                 getData = clazz.getMethod("getData").also { it.isAccessible = true },
-                getCartIconInfo = clazz.getMethod("getCartIconInfo").also { it.isAccessible = true },
-                getEntryGoto = clazz.getMethod("getEntryGoto").also { it.isAccessible = true },
-                getEntryText = runCatching {
-                    clazz.getMethod("getEntryText").also { it.isAccessible = true }
-                }.getOrNull(),
             )
         }.getOrNull()
         if (methods != null) {
