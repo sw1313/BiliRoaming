@@ -37,8 +37,8 @@ android {
         applicationId = "me.custom.biliextras"
         minSdk = 24
         targetSdk = 35
-        versionCode = 30
-        versionName = "1.0.30"
+        versionCode = 37
+        versionName = "1.0.37"
     }
 
     buildTypes {
