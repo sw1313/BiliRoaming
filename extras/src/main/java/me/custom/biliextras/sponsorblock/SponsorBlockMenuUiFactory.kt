@@ -325,6 +325,10 @@ class SponsorBlockMenuUiFactory private constructor(private val classLoader: Cla
             -> SponsorBlockSubmitActionHandler.createSub(
                 classLoader, fn0Class, actionId, context, index, subAction,
             )
+            SponsorBlockSubmitActionHandler.BACK ->
+                SponsorBlockSubmitActionHandler.createBack(
+                    classLoader, fn0Class, context, subAction, index,
+                )
             else -> SponsorBlockSubmitActionHandler.create(classLoader, fn0Class, actionId, context)
         }
         return createDescriptionRow(

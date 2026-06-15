@@ -22,6 +22,9 @@ object SponsorBlockSubmitSubMenu {
     private val drafts = mutableListOf<DraftSegment>()
     /** Pending edits for existing segments keyed by index in {@link SponsorBlockController#segments}. */
     private val existingEdits = mutableMapOf<Int, DraftSegment>()
+    /** Per-video draft memory so start/end survive submenu navigation and reopen. */
+    private val draftsByVideoKey = mutableMapOf<String, MutableList<DraftSegment>>()
+    private val existingEditsByVideoKey = mutableMapOf<String, MutableMap<Int, DraftSegment>>()
 
     fun show(context: Context) {
         val activity = findActivity(context) ?: run {
@@ -34,9 +37,18 @@ object SponsorBlockSubmitSubMenu {
         }
         drafts.clear()
         existingEdits.clear()
+        restoreDraftsForCurrentVideo()
         ensureDefaultDraft()
         SponsorBlockMenuHost.hidePlayerSettingWidgetIfNeeded()
         Handler(Looper.getMainLooper()).post { showMain(context) }
+    }
+
+    fun onBackAction(context: Context, backTarget: Int, itemIndex: Int) {
+        when (backTarget) {
+            0 -> showMain(context)
+            1 -> showDraftEdit(context, itemIndex)
+            2 -> showExistingEdit(context, itemIndex)
+        }
     }
 
     private fun ensureDefaultDraft() {
@@ -64,7 +76,7 @@ object SponsorBlockSubmitSubMenu {
             Triple("反对", "thumb-down-line@500", 4),
             Triple("撤销投票", "arrow-go-back-line@500", 5),
         )
-        val total = actions.size + 1
+        val total = actions.size + 2
         val voteLabel = SponsorBlockState.userVoteLabel(segment.uuid)
         rows.add(
             factory.createInfoRow(
@@ -99,6 +111,19 @@ object SponsorBlockSubmitSubMenu {
                 ),
             )
         }
+        rows.add(
+            factory.createSubmitActionRow(
+                "返回",
+                "arrow-left-line@500",
+                "提交片段列表",
+                false,
+                factory.videoSettingTypeForIndex(total - 1, total),
+                SponsorBlockSubmitActionHandler.BACK,
+                context,
+                index,
+                0,
+            ),
+        )
         rows.add(factory.createSpacer(16))
         SponsorBlockVideoSettingDialog.show(activity, rows)
     }
@@ -115,7 +140,7 @@ object SponsorBlockSubmitSubMenu {
             Triple("添加另一个片段", "add-line@500", 4),
             Triple("移除此片段", "delete-bin-line@500", 3),
         )
-        val total = actions.size + 1
+        val total = actions.size + 2
         rows.add(
             factory.createInfoRow(
                 "新片段 ${index + 1}",
@@ -145,6 +170,19 @@ object SponsorBlockSubmitSubMenu {
                 ),
             )
         }
+        rows.add(
+            factory.createSubmitActionRow(
+                "返回",
+                "arrow-left-line@500",
+                "提交片段列表",
+                false,
+                factory.videoSettingTypeForIndex(total - 1, total),
+                SponsorBlockSubmitActionHandler.BACK,
+                context,
+                index,
+                0,
+            ),
+        )
         rows.add(factory.createSpacer(16))
         SponsorBlockVideoSettingDialog.show(activity, rows)
     }
@@ -161,7 +199,7 @@ object SponsorBlockSubmitSubMenu {
             (if (isStart) "设为视频开头" else "设为视频结尾") to 1,
             "手动输入时间" to 2,
         )
-        val total = actions.size + 1
+        val total = actions.size + 2
         rows.add(
             factory.createInfoRow(
                 if (isStart) "开始时间" else "结束时间",
@@ -185,6 +223,19 @@ object SponsorBlockSubmitSubMenu {
                 ),
             )
         }
+        rows.add(
+            factory.createSubmitActionRow(
+                "返回",
+                "arrow-left-line@500",
+                "新片段 ${draftIndex + 1}",
+                false,
+                factory.videoSettingTypeForIndex(total - 1, total),
+                SponsorBlockSubmitActionHandler.BACK,
+                context,
+                draftIndex,
+                1,
+            ),
+        )
         rows.add(factory.createSpacer(16))
         SponsorBlockVideoSettingDialog.show(activity, rows)
     }
@@ -204,7 +255,7 @@ object SponsorBlockSubmitSubMenu {
             (if (isStart) "设为视频开头" else "设为视频结尾") to 1,
             "手动输入时间" to 2,
         )
-        val total = actions.size + 1
+        val total = actions.size + 2
         rows.add(
             factory.createInfoRow(
                 if (isStart) "开始时间" else "结束时间",
@@ -228,6 +279,19 @@ object SponsorBlockSubmitSubMenu {
                 ),
             )
         }
+        rows.add(
+            factory.createSubmitActionRow(
+                "返回",
+                "arrow-left-line@500",
+                "已有片段",
+                false,
+                factory.videoSettingTypeForIndex(total - 1, total),
+                SponsorBlockSubmitActionHandler.BACK,
+                context,
+                existingIndex,
+                2,
+            ),
+        )
         rows.add(factory.createSpacer(16))
         SponsorBlockVideoSettingDialog.show(activity, rows)
     }
@@ -240,10 +304,12 @@ object SponsorBlockSubmitSubMenu {
             3 -> {
                 drafts.removeAt(index)
                 if (drafts.isEmpty()) ensureDefaultDraft()
+                persistDraftsForCurrentVideo()
                 showMain(context)
             }
             4 -> addDraftAndRefresh(context)
         }
+        persistDraftsForCurrentVideo()
     }
 
     fun onExistingAction(context: Context, index: Int, subAction: Int) {
@@ -266,11 +332,13 @@ object SponsorBlockSubmitSubMenu {
             0 -> {
                 val pos = currentPositionMs()
                 if (isStart) draft.startMs = pos else draft.endMs = pos
+                persistDraftsForCurrentVideo()
                 showDraftEdit(context, draftIndex)
             }
             1 -> {
                 val duration = durationMs()
                 if (isStart) draft.startMs = 0L else draft.endMs = duration
+                persistDraftsForCurrentVideo()
                 showDraftEdit(context, draftIndex)
             }
             2 -> showManualTimeInput(context, draftIndex, isStart, existingIndex = null)
@@ -287,11 +355,13 @@ object SponsorBlockSubmitSubMenu {
             0 -> {
                 val pos = currentPositionMs()
                 if (isStart) edit.startMs = pos else edit.endMs = pos
+                persistDraftsForCurrentVideo()
                 showExistingEdit(context, existingIndex)
             }
             1 -> {
                 val duration = durationMs()
                 if (isStart) edit.startMs = 0L else edit.endMs = duration
+                persistDraftsForCurrentVideo()
                 showExistingEdit(context, existingIndex)
             }
             2 -> showManualTimeInput(context, draftIndex = null, isStart, existingIndex)
@@ -302,6 +372,7 @@ object SponsorBlockSubmitSubMenu {
         val pos = currentPositionMs()
         val end = (pos + 10_000).coerceAtMost(durationMs())
         drafts.add(DraftSegment(pos, end, "sponsor"))
+        persistDraftsForCurrentVideo()
         showMain(context)
     }
 
@@ -350,6 +421,7 @@ object SponsorBlockSubmitSubMenu {
             Log.toast(if (ok) "已提交 ${segments.size} 个新片段" else "提交失败：${error ?: "未知错误"}")
             if (ok) {
                 drafts.clear()
+                currentVideoKey()?.let { draftsByVideoKey.remove(it) }
                 SponsorBlockVideoSettingDialog.dismiss()
             }
         }
@@ -521,6 +593,7 @@ object SponsorBlockSubmitSubMenu {
                     }
                 } else {
                     drafts.getOrNull(index)?.categoryId = categoryId
+                    persistDraftsForCurrentVideo()
                     showDraftEdit(context, index)
                 }
             }
@@ -567,6 +640,7 @@ object SponsorBlockSubmitSubMenu {
                     draftIndex != null -> {
                         val d = drafts.getOrNull(draftIndex) ?: return@setPositiveButton
                         if (isStart) d.startMs = ms else d.endMs = ms
+                        persistDraftsForCurrentVideo()
                         showDraftEdit(context, draftIndex)
                     }
                     existingIndex != null -> {
@@ -578,6 +652,7 @@ object SponsorBlockSubmitSubMenu {
                                 }
                             } ?: return@setPositiveButton
                         if (isStart) e.startMs = ms else e.endMs = ms
+                        persistDraftsForCurrentVideo()
                         showExistingEdit(context, existingIndex)
                     }
                 }
@@ -602,6 +677,29 @@ object SponsorBlockSubmitSubMenu {
 
     private fun timeRange(startMs: Long, endMs: Long): String =
         "${SponsorBlockTimeFormat.formatMs(startMs)} → ${SponsorBlockTimeFormat.formatMs(endMs)}"
+
+    private fun currentVideoKey(): String? {
+        val video = SponsorBlockController.currentVideo ?: return null
+        return "${video.bvid}_${video.cid}"
+    }
+
+    private fun restoreDraftsForCurrentVideo() {
+        val key = currentVideoKey() ?: return
+        draftsByVideoKey[key]?.let { saved ->
+            drafts.addAll(saved.map { it.copy() })
+        }
+        existingEditsByVideoKey[key]?.let { saved ->
+            existingEdits.putAll(saved.mapValues { it.value.copy() })
+        }
+    }
+
+    private fun persistDraftsForCurrentVideo() {
+        val key = currentVideoKey() ?: return
+        draftsByVideoKey[key] = drafts.map { it.copy() }.toMutableList()
+        if (existingEdits.isNotEmpty()) {
+            existingEditsByVideoKey[key] = existingEdits.mapValues { it.value.copy() }.toMutableMap()
+        }
+    }
 
     private fun findActivity(context: Context): Activity? {
         var ctx: Context? = context

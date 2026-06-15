@@ -125,6 +125,9 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
         @Volatile
         var postResumeCatchUpRunnable: Runnable? = null
 
+        @Volatile
+        var endPollingRunnable: Runnable? = null
+
         fun cancelPostResumeCatchUp() {
             postResumeCatchUpRunnable?.let { mainHandler.removeCallbacks(it) }
             postResumeCatchUpRunnable = null
@@ -297,6 +300,16 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
             return true
         }
         return false
+    }
+
+    /** Only the main-feed / active player should disable single-loop for bg auto-next. */
+    private fun Any.shouldManageBackgroundLoopMode(): Boolean {
+        if (this === activeStoryPlayer) return true
+        val playerId = System.identityHashCode(this)
+        if (backgroundEnginePlayerId >= 0 && playerId == backgroundEnginePlayerId) return true
+        val host = storyPagerHostClass() ?: playerHostByInstance[playerId]
+        return host == HOST_MAIN && storyPagerTag() == "StoryVideoFragment" &&
+            backgroundEngineHost == HOST_MAIN
     }
 
     /** StoryPagerPlayer tag, e.g. "StoryVideoFragment" / "StorySpaceFragment" (field f208454a). */
@@ -636,14 +649,13 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
         if (u2PauseMethod != null) {
             u2PauseMethod.hookMethod { chain ->
                 val player = chain.thisObject
-                if (player === activeStoryPlayer) {
-                    player.realignEngineTrackingToPager("u2")
-                }
                 isInBackground = true
-                if (isAutoNextEnabled()) {
-                    applyBackgroundLoopMode(chain.thisObject, autoNext = true)
-                } else {
-                    applyBackgroundLoopMode(chain.thisObject, autoNext = false)
+                if (player.shouldManageBackgroundLoopMode()) {
+                    player.realignEngineTrackingToPager("u2")
+                    if (isAutoNextEnabled()) {
+                        applyBackgroundLoopMode(player, autoNext = true)
+                    }
+                    ensurePolling()
                 }
                 chain.proceed()
             }
@@ -676,6 +688,10 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
                     )
                 }
                 isInBackground = false
+                stopEndPolling()
+                if (player.shouldManageBackgroundLoopMode() && isAutoNextEnabled()) {
+                    applyBackgroundLoopMode(player, autoNext = false)
+                }
                 val runSync = player.shouldRunW2PagerSync(pendingIndex)
                 if (backgroundEngineMoved && runSync) {
                     val cleared = player.clearDeferredFeedQueue()
@@ -1197,17 +1213,30 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
     }
 
     private fun ensurePolling() {
-        if (!isAutoNextEnabled()) return
+        if (!isAutoNextEnabled() || !isInBackground) return
         if (polling) return
         polling = true
-        mainHandler.post(object : Runnable {
+        val runnable = object : Runnable {
             override fun run() {
-                if (!isAutoNextEnabled()) return
+                if (!isAutoNextEnabled() || !isInBackground) {
+                    stopEndPolling()
+                    return
+                }
                 runCatching { checkPlaybackEndAndNext() }.onFailure { Log.e(it) }
-                mainHandler.postDelayed(this, POLL_INTERVAL_MS)
+                if (polling && isInBackground) {
+                    mainHandler.postDelayed(this, POLL_INTERVAL_MS)
+                }
             }
-        })
+        }
+        endPollingRunnable = runnable
+        mainHandler.post(runnable)
         Log.x("StoryAutoNext: started end polling")
+    }
+
+    private fun stopEndPolling() {
+        endPollingRunnable?.let { mainHandler.removeCallbacks(it) }
+        endPollingRunnable = null
+        polling = false
     }
 
     /**
@@ -1229,9 +1258,9 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
     }
 
     private fun checkPlaybackEndAndNext() {
-        if (!isAutoNextEnabled()) return
-        // Prefer StoryPlayer's live core; activePlayerCore from graph scan can be a stale wrapper.
-        val core = liveStoryPlayerCore() ?: activePlayerCore ?: return
+        if (!isAutoNextEnabled() || !isInBackground) return
+        val root = activeStoryPlayer ?: return
+        val core = liveStoryPlayerCore() ?: return
         val position = core.invokeLongGetter("getCurrentPosition", "getRealCurrentPosition") ?: return
         val duration = core.invokeLongGetter("getDuration", "getRealDuration") ?: return
         prefetchOfficialStoryListIfNeeded()
@@ -1242,7 +1271,6 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
             "StoryAutoNext: playback ended key=$activeStoryKey, position=$position, duration=$duration, " +
                 "core=${core.javaClass.name}#${System.identityHashCode(core)} bg=$isInBackground",
         )
-        if (!isInBackground) return
         if (triggerNextStory()) {
             lastNextAtMs = now
         }

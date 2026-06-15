@@ -18,6 +18,8 @@ public final class SponsorBlockSubmitActionHandler implements InvocationHandler 
     /** draft time: subAction 0=current, 1=begin/end, 2=manual; timeField 0=start, 1=end */
     public static final int TIME_ACTION = 7;
     public static final int EXISTING_TIME = 8;
+    /** subAction: 0=main, 1=draftEdit, 2=existingEdit */
+    public static final int BACK = 9;
 
     private final int actionId;
     private final Context context;
@@ -68,6 +70,16 @@ public final class SponsorBlockSubmitActionHandler implements InvocationHandler 
             int subAction
     ) {
         return bind(hostClassLoader, fn0Interface, actionId, context, index, subAction, 0);
+    }
+
+    public static Object createBack(
+            ClassLoader hostClassLoader,
+            Class<?> fn0Interface,
+            Context context,
+            int subAction,
+            int index
+    ) {
+        return bind(hostClassLoader, fn0Interface, BACK, context, index, subAction, 0);
     }
 
     public static Object createTime(
@@ -156,6 +168,9 @@ public final class SponsorBlockSubmitActionHandler implements InvocationHandler 
                 SponsorBlockSubmitSubMenu.INSTANCE.onExistingTimeAction(
                         context, index, timeField, subAction
                 );
+                break;
+            case BACK:
+                SponsorBlockSubmitSubMenu.INSTANCE.onBackAction(context, subAction, index);
                 break;
             default:
                 break;
