@@ -41,7 +41,7 @@ object SponsorBlockApi {
         }
     }.onFailure {
         SponsorBlockPrefs.setStatus("异常：${it.message}")
-        Log.w("SponsorBlock API failed: ${it.message}")
+        Log.w { "SponsorBlock API failed: ${it.message}" }
     }
 
     fun checkStatus(): Result<Boolean> = runCatching {
@@ -51,7 +51,7 @@ object SponsorBlockApi {
         ok
     }.onFailure {
         SponsorBlockPrefs.setStatus("异常：${it.message}")
-        Log.w("SponsorBlock status failed: ${it.message}")
+        Log.w { "SponsorBlock status failed: ${it.message}" }
     }
 
     fun userInfo(): Result<String> = runCatching {
@@ -70,7 +70,7 @@ object SponsorBlockApi {
     }.onFailure {
         val msg = "异常：${it.message}"
         SponsorBlockPrefs.setUserInfo(msg)
-        Log.w("SponsorBlock user info failed: ${it.message}")
+        Log.w { "SponsorBlock user info failed: ${it.message}" }
     }
 
     fun viewedVideoSponsorTime(uuid: String): Result<Boolean> = runCatching {
@@ -80,7 +80,7 @@ object SponsorBlockApi {
         )
         response.code == 200
     }.onFailure {
-        Log.w("SponsorBlock track failed: ${it.message}")
+        Log.w { "SponsorBlock track failed: ${it.message}" }
     }
 
     data class SubmitSegment(
@@ -113,7 +113,7 @@ object SponsorBlockApi {
         check(response.code in 200..299) { "HTTP ${response.code}: ${response.body.take(120)}" }
         response.body
     }.onFailure {
-        Log.w("SponsorBlock submit failed: ${it.message}")
+        Log.w { "SponsorBlock submit failed: ${it.message}" }
     }
 
     fun voteOnSponsorTime(uuid: String, type: Int, category: String? = null): Result<Boolean> = runCatching {
@@ -126,7 +126,7 @@ object SponsorBlockApi {
         val response = postWithCacheBypass("${SponsorBlockPrefs.server}/api/voteOnSponsorTime", body)
         response.code in 200..299
     }.onFailure {
-        Log.w("SponsorBlock vote failed: ${it.message}")
+        Log.w { "SponsorBlock vote failed: ${it.message}" }
     }
 
     private fun postWithCacheBypass(url: String, body: String): HttpResponse {
@@ -160,18 +160,14 @@ object SponsorBlockApi {
             val startedAt = System.currentTimeMillis()
             try {
                 val response = get(url)
-                Log.x(
-                    "SponsorBlock API GET ok code=${response.code}, " +
-                        "attempt=${index + 1}/$REQUEST_ATTEMPTS, elapsed=${System.currentTimeMillis() - startedAt}ms",
-                )
+                Log.trace { "SponsorBlock API GET ok code=${response.code}, " +
+                        "attempt=${index + 1}/$REQUEST_ATTEMPTS, elapsed=${System.currentTimeMillis() - startedAt}ms" }
                 return response
             } catch (error: Throwable) {
                 lastError = error
-                Log.x(
-                    "SponsorBlock API GET failed attempt=${index + 1}/$REQUEST_ATTEMPTS, " +
+                Log.trace { "SponsorBlock API GET failed attempt=${index + 1}/$REQUEST_ATTEMPTS, " +
                         "elapsed=${System.currentTimeMillis() - startedAt}ms, " +
-                        "error=${error.javaClass.simpleName}: ${error.message}, url=${url.take(200)}",
-                )
+                        "error=${error.javaClass.simpleName}: ${error.message}, url=${url.take(200)}" }
                 if (index + 1 < REQUEST_ATTEMPTS) {
                     Thread.sleep(500L)
                 }

@@ -34,7 +34,7 @@ class SponsorBlockPlayerMenuHook(classLoader: ClassLoader) : BaseHook(classLoade
         hookTheseusHalfScreenMenu()
         hookStoryMenu()
         hookFabFallback()
-        Log.x("SponsorBlockPlayerMenu: hooks installed, native=${uiFactory.isNativeAvailable()}")
+        Log.s("SponsorBlockPlayerMenu: hooks installed, native=${uiFactory.isNativeAvailable()}")
     }
 
     private fun hookFullscreenPlayerMenu() {
@@ -51,7 +51,7 @@ class SponsorBlockPlayerMenuHook(classLoader: ClassLoader) : BaseHook(classLoade
             val settingType = chain.args[1]
             prependMainEntry(original.toMutableList(), context, settingType, PlayerMenuKind.UGC)
         }
-        Log.x("SponsorBlockPlayerMenu: hooked PlayerSettingFunctionWidget2.v0(autoPlayer)")
+        Log.s("SponsorBlockPlayerMenu: hooked PlayerSettingFunctionWidget2.v0(autoPlayer)")
     }
 
     private fun hookTheseusHalfScreenMenu() {
@@ -70,7 +70,7 @@ class SponsorBlockPlayerMenuHook(classLoader: ClassLoader) : BaseHook(classLoade
             }
             chain.proceed()
         }
-        Log.x("SponsorBlockPlayerMenu: hooked Theseus MenuService.g1")
+        Log.s("SponsorBlockPlayerMenu: hooked Theseus MenuService.g1")
     }
 
     private fun hookStoryMenu() {
@@ -95,12 +95,12 @@ class SponsorBlockPlayerMenuHook(classLoader: ClassLoader) : BaseHook(classLoade
             }
             chain.proceed()
         }
-        Log.x("SponsorBlockPlayerMenu: hooked StoryMenuService.m0(autoScroll)")
+        Log.s("SponsorBlockPlayerMenu: hooked StoryMenuService.m0(autoScroll)")
     }
 
     private fun hookSettingListScope(createGroupClassName: String) {
         val createGroupClass = createGroupClassName.from(mClassLoader) ?: run {
-            Log.w("SponsorBlockPlayerMenu: missing $createGroupClassName")
+            Log.w { "SponsorBlockPlayerMenu: missing $createGroupClassName" }
             return
         }
         val hooked = hookInvokeSuspend(createGroupClass) { chain ->
@@ -113,9 +113,9 @@ class SponsorBlockPlayerMenuHook(classLoader: ClassLoader) : BaseHook(classLoade
             }
         }
         if (hooked) {
-            Log.x("SponsorBlockPlayerMenu: hooked $createGroupClassName.invokeSuspend")
+            Log.s("SponsorBlockPlayerMenu: hooked $createGroupClassName.invokeSuspend")
         } else {
-            Log.w("SponsorBlockPlayerMenu: invokeSuspend not found on $createGroupClassName")
+            Log.w { "SponsorBlockPlayerMenu: invokeSuspend not found on $createGroupClassName" }
         }
     }
 
@@ -136,11 +136,11 @@ class SponsorBlockPlayerMenuHook(classLoader: ClassLoader) : BaseHook(classLoade
 
     private fun injectMainEntry(menuHost: Any, videoSettingType: Any?, kind: PlayerMenuKind) {
         val list = settingListLocal.get() ?: run {
-            Log.w("SponsorBlockPlayerMenu: inject skipped, \$list ThreadLocal empty")
+            Log.w { "SponsorBlockPlayerMenu: inject skipped, \$list ThreadLocal empty" }
             return
         }
         val context = extractContext(menuHost) ?: run {
-            Log.w("SponsorBlockPlayerMenu: inject skipped, context missing on ${menuHost.javaClass.name}")
+            Log.w { "SponsorBlockPlayerMenu: inject skipped, context missing on ${menuHost.javaClass.name}" }
             return
         }
         val settingType = videoSettingType ?: uiFactory.middleVideoSettingType() ?: return
@@ -149,8 +149,8 @@ class SponsorBlockPlayerMenuHook(classLoader: ClassLoader) : BaseHook(classLoade
         uiFactory.createMainEntryRow(context, settingType)?.let {
             list.add(index, it)
             PlaybackMenuRows.injectAfterSponsorBlock(uiFactory, list, context, kind, index + 1)
-            Log.x("SponsorBlockPlayerMenu: injected main + playback entries at index=$index kind=$kind")
-        } ?: Log.w("SponsorBlockPlayerMenu: inject failed, row creation returned null")
+            Log.trace { "SponsorBlockPlayerMenu: injected main + playback entries at index=$index kind=$kind" }
+        } ?: Log.w { "SponsorBlockPlayerMenu: inject failed, row creation returned null" }
     }
 
     private fun prependMainEntry(
@@ -163,8 +163,8 @@ class SponsorBlockPlayerMenuHook(classLoader: ClassLoader) : BaseHook(classLoade
             SponsorBlockMenuHost.setPlayerMenuKind(kind)
             rows.add(0, it)
             PlaybackMenuRows.injectAfterSponsorBlock(uiFactory, rows, context, kind, 1)
-            Log.x("SponsorBlockPlayerMenu: prepended main + playback entries in fullscreen menu kind=$kind")
-        } ?: Log.w("SponsorBlockPlayerMenu: prepend skipped, row creation failed")
+            Log.trace { "SponsorBlockPlayerMenu: prepended main + playback entries in fullscreen menu kind=$kind" }
+        } ?: Log.w { "SponsorBlockPlayerMenu: prepend skipped, row creation failed" }
         return rows
     }
 
@@ -206,10 +206,10 @@ class SponsorBlockPlayerMenuHook(classLoader: ClassLoader) : BaseHook(classLoade
                 marginEnd = (12 * context.resources.displayMetrics.density).toInt()
             }
             anchor.addView(fab, params)
-            Log.x("SponsorBlockPlayerMenu: FAB fallback attached")
+            Log.trace { "SponsorBlockPlayerMenu: FAB fallback attached" }
         }.onFailure {
             fabShown.set(false)
-            Log.w("SponsorBlockPlayerMenu FAB failed: ${it.message}")
+            Log.w { "SponsorBlockPlayerMenu FAB failed: ${it.message}" }
         }
     }
 

@@ -9,7 +9,7 @@ import me.custom.biliextras.utils.ePrefs
 
 enum class PlayerMenuKind {
     UGC,
-    STORY,
+    STORY
 }
 
 object PlaybackMenuRows {

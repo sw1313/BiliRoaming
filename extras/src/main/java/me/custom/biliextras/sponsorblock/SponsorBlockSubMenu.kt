@@ -38,7 +38,7 @@ object SponsorBlockSubMenu {
 
         }.onFailure {
 
-            Log.w("SponsorBlock submenu failed: ${it.message}")
+            Log.w { "SponsorBlock submenu failed: ${it.message}" }
 
             Log.toast("无法打开空降菜单")
 

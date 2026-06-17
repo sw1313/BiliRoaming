@@ -26,7 +26,7 @@ internal object ForegroundAutoNextContinuousPlay {
             runCatching { it.javaClass.getMethod("getAvid").invoke(it) as Long }.getOrDefault(0L)
         } ?: service?.let { UgcBackgroundPlayReflection.currentAvid(it) } ?: 0L
         if (avid <= 0L) {
-            Log.x("ForegroundAutoNext: ContinuousPlay skipped, no avid")
+            Log.trace { "ForegroundAutoNext: ContinuousPlay skipped, no avid" }
             return emptyList()
         }
 
@@ -68,12 +68,12 @@ internal object ForegroundAutoNextContinuousPlay {
         val reply = runCatching {
             mossClass.getMethod(methodName, reqClass).invoke(moss, req)
         }.onFailure {
-            Log.s("ForegroundAutoNext: ContinuousPlay invoke failed: ${it.message}")
+            Log.trace { "ForegroundAutoNext: ContinuousPlay invoke failed: ${it.message}" }
         }.getOrNull() ?: return emptyList()
 
         @Suppress("UNCHECKED_CAST")
         val relates = (reply.javaClass.getMethod("getRelatesList").invoke(reply) as? List<*>).orEmpty()
-        Log.x("ForegroundAutoNext: ContinuousPlay avid=$avid relates=${relates.size}")
+        Log.trace { "ForegroundAutoNext: ContinuousPlay avid=$avid relates=${relates.size}" }
         return relates.mapNotNull { parseRelate(it) }
             .filter { !BlockChargingVideoHook.shouldBlockAvid(it.avid) }
     }

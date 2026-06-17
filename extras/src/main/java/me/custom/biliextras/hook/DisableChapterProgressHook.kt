@@ -12,7 +12,7 @@ class DisableChapterProgressHook(mClassLoader: ClassLoader) : BaseHook(mClassLoa
 
         @JvmStatic
         fun onPrefChanged(enabled: Boolean) {
-            Log.x("DisableChapterProgress: pref -> $enabled")
+            Log.trace { "DisableChapterProgress: pref -> $enabled" }
         }
     }
 
@@ -20,7 +20,7 @@ class DisableChapterProgressHook(mClassLoader: ClassLoader) : BaseHook(mClassLoa
         hookChronosThumbnailInfo()
         hookChronosVideoViewPoint()
         hookChronosWatchPointDispatch()
-        Log.s("DisableChapterProgress: started")
+        Log.trace { "DisableChapterProgress: started" }
     }
 
     private fun hookChronosThumbnailInfo() {
@@ -28,7 +28,7 @@ class DisableChapterProgressHook(mClassLoader: ClassLoader) : BaseHook(mClassLoa
             mClassLoader.loadClass("tv.danmaku.biliplayerv2.service.interact.biz.model.ChronosThumbnailInfo")
         }.getOrNull()
         if (chronosClass == null) {
-            Log.x("DisableChapterProgress: ChronosThumbnailInfo not found")
+            Log.trace { "DisableChapterProgress: ChronosThumbnailInfo not found" }
             return
         }
 
@@ -52,9 +52,7 @@ class DisableChapterProgressHook(mClassLoader: ClassLoader) : BaseHook(mClassLoa
             }
         }
 
-        Log.x(
-            "DisableChapterProgress: ChronosThumbnailInfo hooked ${listGetters.size} getters, ${watchPointListSetters.size} setters"
-        )
+        Log.s("DisableChapterProgress: ChronosThumbnailInfo hooked ${listGetters.size} getters, ${watchPointListSetters.size} setters")
     }
 
     private fun hookChronosVideoViewPoint() {
@@ -84,7 +82,7 @@ class DisableChapterProgressHook(mClassLoader: ClassLoader) : BaseHook(mClassLoa
                 }
             }
 
-        Log.x("DisableChapterProgress: hooked VideoViewPoint video point source")
+        Log.s("DisableChapterProgress: hooked VideoViewPoint video point source")
     }
 
     private fun hookChronosWatchPointDispatch() {
@@ -95,6 +93,6 @@ class DisableChapterProgressHook(mClassLoader: ClassLoader) : BaseHook(mClassLoa
             if (!isEnabled()) return@hookMethod chain.proceed()
             null
         }
-        Log.x("DisableChapterProgress: hooked ChronosInteractContainer.n0")
+        Log.s("DisableChapterProgress: hooked ChronosInteractContainer.n0")
     }
 }

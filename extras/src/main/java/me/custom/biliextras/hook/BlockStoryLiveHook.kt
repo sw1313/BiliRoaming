@@ -29,12 +29,12 @@ class BlockStoryLiveHook(classLoader: ClassLoader) : BaseHook(classLoader) {
 
     private fun hookStoryPagerPlayer() {
         val addVideo = instance.addVideoMethod()?.name ?: run {
-            Log.w("BlockStoryLive: addVideo method not found")
+            Log.w { "BlockStoryLive: addVideo method not found" }
             return
         }
         val playerClass = instance.storyPagerPlayerClass ?: return
 
-        Log.d("startHook: BlockStoryLive on ${playerClass.name}#$addVideo")
+        Log.s("startHook: BlockStoryLive on ${playerClass.name}#$addVideo")
         playerClass.hookMethod(addVideo, List::class.java) { chain ->
             val storyDetailList = chain.args[0] as? MutableList<Any?> ?: return@hookMethod chain.proceed()
             storyDetailList.filterStoryLiveList()
@@ -77,7 +77,7 @@ class BlockStoryLiveHook(classLoader: ClassLoader) : BaseHook(classLoader) {
         }
         val removed = before - size
         if (removed > 0) {
-            Log.d("BlockStoryLive: removed $removed live item(s)")
+            Log.d { "BlockStoryLive: removed $removed live item(s)" }
         }
     }
 }

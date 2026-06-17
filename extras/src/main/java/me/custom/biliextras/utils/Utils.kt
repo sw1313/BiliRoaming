@@ -61,6 +61,23 @@ object Log {
     fun w(obj: Any?) { if (verbose) doLog(ALog::w, obj) }
     fun x(obj: Any?) { if (verbose) doLog(ALog::i, obj, true) }
 
+    /** Lazy verbose traces — string building runs only when详细日志 is on. */
+    fun d(lazyMessage: () -> Any?) {
+        if (verbose) doLog(ALog::d, lazyMessage(), false)
+    }
+
+    fun i(lazyMessage: () -> Any?) {
+        if (verbose) doLog(ALog::i, lazyMessage(), false)
+    }
+
+    fun w(lazyMessage: () -> Any?) {
+        if (verbose) doLog(ALog::w, lazyMessage(), false)
+    }
+
+    fun trace(lazyMessage: () -> Any?) {
+        if (verbose) doLog(ALog::i, lazyMessage(), true)
+    }
+
     /** One-shot startup/feature-activation confirmations: always emitted (necessary log). */
     fun s(obj: Any?) = doLog(ALog::i, obj, true)
 }

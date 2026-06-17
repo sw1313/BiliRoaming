@@ -30,7 +30,7 @@ class MediaButtonControlHook(classLoader: ClassLoader) : BaseHook(classLoader) {
 
         @JvmStatic
         fun onPrefChanged(enabled: Boolean) {
-            Log.x("MediaButton: pref -> $enabled")
+            Log.trace { "MediaButton: pref -> $enabled" }
             liveClassLoader.get()?.let { loader ->
                 refreshMediaSessionActions(loader)
             }
@@ -46,9 +46,9 @@ class MediaButtonControlHook(classLoader: ClassLoader) : BaseHook(classLoader) {
                 val instance = findMediaSessionPlaybackInstance(cls) ?: return
                 refresh.isAccessible = true
                 refresh.invoke(instance)
-                Log.x("MediaButton: refreshed session via ${cls.simpleName}.${refresh.name}()")
+                Log.trace { "MediaButton: refreshed session via ${cls.simpleName}.${refresh.name}()" }
             }.onFailure {
-                Log.x("MediaButton: session refresh failed: ${it.message}")
+                Log.trace { "MediaButton: session refresh failed: ${it.message}" }
             }
         }
 
@@ -85,27 +85,27 @@ class MediaButtonControlHook(classLoader: ClassLoader) : BaseHook(classLoader) {
 
     private fun hookStorySkip() {
         val handlerClass = STORY_HANDLER.findClassOrNull(mClassLoader) ?: run {
-            Log.x("MediaButton: StoryPlayer\$v not found")
+            Log.trace { "MediaButton: StoryPlayer\$v not found" }
             return
         }
-        handlerClass.hookMethod("i") {
-            if (!isEnabled()) return@hookMethod null
-            Log.x("MediaButton: story next")
+        handlerClass.hookMethod("i") { chain ->
+            if (!isEnabled()) return@hookMethod chain.proceed()
+            Log.trace { "MediaButton: story next" }
             StoryBackgroundAutoNextHook.mediaNext()
             null
         }
-        handlerClass.hookMethod("j") {
-            if (!isEnabled()) return@hookMethod null
-            Log.x("MediaButton: story previous")
+        handlerClass.hookMethod("j") { chain ->
+            if (!isEnabled()) return@hookMethod chain.proceed()
+            Log.trace { "MediaButton: story previous" }
             StoryBackgroundAutoNextHook.mediaPrevious()
             null
         }
-        Log.x("MediaButton: hooked ${handlerClass.name}.i()/j()")
+        Log.s("MediaButton: hooked ${handlerClass.name}.i()/j()")
     }
 
     private fun hookNormalNext() {
         val innerClass = UGC_DIRECTOR_INNER.findClassOrNull(mClassLoader) ?: run {
-            Log.x("MediaButton: UGCDirectorSerialOperationsService\$a not found")
+            Log.trace { "MediaButton: UGCDirectorSerialOperationsService\$a not found" }
             return
         }
         innerClass.hookMethod("switchToNext", Boolean::class.javaPrimitiveType) { chain ->
@@ -133,15 +133,15 @@ class MediaButtonControlHook(classLoader: ClassLoader) : BaseHook(classLoader) {
             }.getOrNull() ?: return@hookMethod chain.proceed()
 
             if (!ForegroundAutoNextPrefs.shouldApplyAiAutoNext(service)) {
-                Log.x("MediaButton: normal foreground next scope disabled, native")
+                Log.trace { "MediaButton: normal foreground next scope disabled, native" }
                 return@hookMethod chain.proceed()
             }
 
-            Log.x("MediaButton: normal foreground next -> open related video")
+            Log.trace { "MediaButton: normal foreground next -> open related video" }
             ForegroundAutoNextHook.openNextRelate(mClassLoader, service)
             null
         }
-        Log.x("MediaButton: hooked ${innerClass.name}.switchToNext()")
+        Log.s("MediaButton: hooked ${innerClass.name}.switchToNext()")
     }
 
     private fun outerDirector(inner: Any): Any? {
@@ -152,14 +152,14 @@ class MediaButtonControlHook(classLoader: ClassLoader) : BaseHook(classLoader) {
 
     private fun hookAdvertiseActions() {
         val cls = DEFAULT_MEDIA_SESSION_PLAYBACK.findClassOrNull(mClassLoader) ?: run {
-            Log.x("MediaButton: DefaultMediaSessionPlayback not found")
+            Log.trace { "MediaButton: DefaultMediaSessionPlayback not found" }
             return
         }
         cls.hookMethod("v") { isEnabled() }
         cls.hookMethod("w") { isEnabled() }
         hookPlaybackActionMask(cls, "g")
         hookPlaybackActionMask(cls, "f")
-        Log.x("MediaButton: hooked skip action advertisement")
+        Log.s("MediaButton: hooked skip action advertisement")
     }
 
     private fun hookPlaybackActionMask(cls: Class<*>, methodName: String) {

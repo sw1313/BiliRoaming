@@ -64,7 +64,7 @@ class BlockStoryGoodsHook(classLoader: ClassLoader) : BaseHook(classLoader) {
     private fun blockShopCartWidget() {
         val widgetClass = "com.bilibili.video.story.action.widget.StoryShopCartWidget"
             .findClassOrNull(mClassLoader) ?: run {
-            Log.x("BlockStoryGoods: StoryShopCartWidget not found")
+            Log.trace { "BlockStoryGoods: StoryShopCartWidget not found" }
             return
         }
 
@@ -73,7 +73,7 @@ class BlockStoryGoodsHook(classLoader: ClassLoader) : BaseHook(classLoader) {
             "com.bilibili.video.story.action.StoryActionType",
             "com.bilibili.video.story.action.j",
         ) { null }
-        Log.x("BlockStoryGoods: hooked StoryShopCartWidget.O -> ${oHandle != null}")
+        Log.s("BlockStoryGoods: hooked StoryShopCartWidget.O -> ${oHandle != null}")
 
         val proxyInterface = "w12.a".findClassOrNull(mClassLoader)
         widgetClass.hookMethod("j2", "com.bilibili.video.story.action.h") { chain ->
@@ -123,7 +123,7 @@ class BlockStoryGoodsHook(classLoader: ClassLoader) : BaseHook(classLoader) {
     private fun blockStoryDiversionEntry(blockedGotos: Set<String>, textLabels: Set<String>) {
         val diversionClass = "com.bilibili.video.story.action.widget.StoryDiversionEntryWidget"
             .findClassOrNull(mClassLoader) ?: run {
-            Log.x("BlockStoryGoods: StoryDiversionEntryWidget not found")
+            Log.trace { "BlockStoryGoods: StoryDiversionEntryWidget not found" }
             return
         }
         val oHandle = diversionClass.hookMethod(
@@ -140,7 +140,7 @@ class BlockStoryGoodsHook(classLoader: ClassLoader) : BaseHook(classLoader) {
                 chain.proceed()
             }
         }
-        Log.x("BlockStoryGoods: hooked StoryDiversionEntryWidget.O -> ${oHandle != null}")
+        Log.s("BlockStoryGoods: hooked StoryDiversionEntryWidget.O -> ${oHandle != null}")
     }
 
     private data class CartInfo(val goto: String?, val text: String?)
@@ -162,7 +162,7 @@ class BlockStoryGoodsHook(classLoader: ClassLoader) : BaseHook(classLoader) {
      */
     private fun blockCartIconInfo(blockedGotos: Set<String>, textLabels: Set<String>) {
         val storyDetail = "com.bilibili.video.story.StoryDetail".findClassOrNull(mClassLoader) ?: run {
-            Log.x("BlockStoryGoods: StoryDetail not found (getCartIconInfo)")
+            Log.trace { "BlockStoryGoods: StoryDetail not found (getCartIconInfo)" }
             return
         }
         var mGetEntryGoto: Method? = null
@@ -178,7 +178,7 @@ class BlockStoryGoodsHook(classLoader: ClassLoader) : BaseHook(classLoader) {
             val text = runCatching { mGetEntryText?.invoke(info) as? String }.getOrNull()
             if (shouldBlockDiversionEntry(goto, text, blockedGotos, textLabels)) null else info
         }
-        Log.x("BlockStoryGoods: hooked StoryDetail.getCartIconInfo -> ${handle != null}")
+        Log.s("BlockStoryGoods: hooked StoryDetail.getCartIconInfo -> ${handle != null}")
     }
 
     /**
@@ -264,7 +264,7 @@ class BlockStoryGoodsHook(classLoader: ClassLoader) : BaseHook(classLoader) {
      */
     private fun blockOgvCollection(categoryKeywords: Set<String>) {
         val storyDetail = "com.bilibili.video.story.StoryDetail".findClassOrNull(mClassLoader) ?: run {
-            Log.x("BlockStoryGoods: StoryDetail not found")
+            Log.trace { "BlockStoryGoods: StoryDetail not found" }
             return
         }
         // Resolve the accessors from the actual Collection instance's class at runtime: the inner
@@ -288,7 +288,7 @@ class BlockStoryGoodsHook(classLoader: ClassLoader) : BaseHook(classLoader) {
                 if (blocked) null else col
             }
         }
-        Log.x("BlockStoryGoods: hooked StoryDetail.getCollection -> ${handle != null} (keywords=$categoryKeywords)")
+        Log.s("BlockStoryGoods: hooked StoryDetail.getCollection -> ${handle != null} (keywords=$categoryKeywords)")
     }
 
     /**
@@ -299,7 +299,7 @@ class BlockStoryGoodsHook(classLoader: ClassLoader) : BaseHook(classLoader) {
     private fun blockStoryOgvVipBar() {
         val widgetClass = "com.bilibili.video.story.action.widget.StoryOgvVipBarWidget"
             .findClassOrNull(mClassLoader) ?: run {
-            Log.x("BlockStoryGoods: StoryOgvVipBarWidget not found")
+            Log.trace { "BlockStoryGoods: StoryOgvVipBarWidget not found" }
             return
         }
         widgetClass.hookMethod(
@@ -315,7 +315,7 @@ class BlockStoryGoodsHook(classLoader: ClassLoader) : BaseHook(classLoader) {
             bindStoryController(chain)
             null
         }
-        Log.x("BlockStoryGoods: hooked StoryOgvVipBarWidget")
+        Log.s("BlockStoryGoods: hooked StoryOgvVipBarWidget")
     }
 
     /**
@@ -325,7 +325,7 @@ class BlockStoryGoodsHook(classLoader: ClassLoader) : BaseHook(classLoader) {
     private fun blockStoryLiveReservation() {
         val widgetClass = "com.bilibili.video.story.action.widget.StoryLiveReservationWidget"
             .findClassOrNull(mClassLoader) ?: run {
-            Log.x("BlockStoryGoods: StoryLiveReservationWidget not found")
+            Log.trace { "BlockStoryGoods: StoryLiveReservationWidget not found" }
             return
         }
         widgetClass.hookMethod(
@@ -344,7 +344,7 @@ class BlockStoryGoodsHook(classLoader: ClassLoader) : BaseHook(classLoader) {
             bindStoryController(chain)
             null
         }
-        Log.x("BlockStoryGoods: hooked StoryLiveReservationWidget")
+        Log.s("BlockStoryGoods: hooked StoryLiveReservationWidget")
     }
 
     /**
@@ -354,7 +354,7 @@ class BlockStoryGoodsHook(classLoader: ClassLoader) : BaseHook(classLoader) {
     private fun blockStoryFreeDataPrompt() {
         val componentClass = "com.bilibili.video.story.action.widget.StoryFreeDataPromptComponent"
             .findClassOrNull(mClassLoader) ?: run {
-            Log.x("BlockStoryGoods: StoryFreeDataPromptComponent not found")
+            Log.trace { "BlockStoryGoods: StoryFreeDataPromptComponent not found" }
             return
         }
         componentClass.hookMethod(
@@ -362,7 +362,7 @@ class BlockStoryGoodsHook(classLoader: ClassLoader) : BaseHook(classLoader) {
             "com.bilibili.video.story.action.h",
             ViewGroup::class.java,
         ) { null }
-        Log.x("BlockStoryGoods: hooked StoryFreeDataPromptComponent.m")
+        Log.s("BlockStoryGoods: hooked StoryFreeDataPromptComponent.m")
     }
 
     private fun bindStoryController(chain: XposedInterface.Chain) {
@@ -394,7 +394,7 @@ class BlockStoryGoodsHook(classLoader: ClassLoader) : BaseHook(classLoader) {
     private fun blockStoryAdWidget() {
         val adWidgetClass = "com.bilibili.video.story.action.widget.StoryAdWidget"
             .findClassOrNull(mClassLoader) ?: run {
-            Log.x("BlockStoryGoods: StoryAdWidget not found")
+            Log.trace { "BlockStoryGoods: StoryAdWidget not found" }
             return
         }
         adWidgetClass.hookMethod("j2", "com.bilibili.video.story.action.h") { chain ->

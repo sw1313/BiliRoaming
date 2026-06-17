@@ -11,7 +11,7 @@ object ForegroundAutoNextPrefs {
     enum class Scope {
         SINGLE,
         COLLECTION_MIDDLE,
-        COLLECTION_LAST,
+        COLLECTION_LAST
     }
 
     data class Entry(
@@ -52,19 +52,19 @@ object ForegroundAutoNextPrefs {
         NONE("none", "无"),
         MATCH("match", "与上一视频方向尽量一致"),
         PORTRAIT("portrait", "尽量竖屏"),
-        LANDSCAPE("landscape", "尽量横屏"),
+        LANDSCAPE("landscape", "尽量横屏")
     }
 
     enum class UpPref(val value: String, val title: String) {
         NONE("none", "无"),
         DIFFERENT("different", "尽量与上一 up 不一致"),
-        SAME("same", "尽量与上一 up 一致"),
+        SAME("same", "尽量与上一 up 一致")
     }
 
     enum class TagPref(val value: String, val title: String) {
         NONE("none", "无"),
         SAME("same", "尽量与上一视频含相同 tag"),
-        DIFFERENT("different", "尽量与上一视频不含相同 tag"),
+        DIFFERENT("different", "尽量与上一视频不含相同 tag")
     }
 
     const val KEY_ORIENTATION = "foreground_auto_next_orientation"

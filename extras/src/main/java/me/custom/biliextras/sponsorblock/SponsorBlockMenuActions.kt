@@ -96,7 +96,7 @@ object SponsorBlockMenuActions {
             runCatching {
                 SponsorBlockSubmitDialog.show(context)
             }.onFailure {
-                Log.w("SponsorBlock submit dialog failed: ${it.message}")
+                Log.w { "SponsorBlock submit dialog failed: ${it.message}" }
                 Log.toast("无法打开提交面板", false, Toast.LENGTH_SHORT)
             }
         }

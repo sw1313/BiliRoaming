@@ -53,7 +53,7 @@ class ForegroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoader) {
         val repoClass =
             "com.bilibili.ship.theseus.united.page.background.PageBackgroundPlayRepository"
                 .findClassOrNull(mClassLoader) ?: run {
-                Log.x("ForegroundAutoNext: PageBackgroundPlayRepository not found")
+                Log.trace { "ForegroundAutoNext: PageBackgroundPlayRepository not found" }
                 return
             }
         repoClass.hookMethod("w") { chain ->
@@ -75,7 +75,7 @@ class ForegroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoader) {
             if (repo0 != null && runCatching { readRealBackground(repo0) }.getOrDefault(false)) {
                 activating = false
                 clearPendingCompletion()
-                Log.x("ForegroundAutoNext: t() in real background, leaving to native AI")
+                Log.trace { "ForegroundAutoNext: t() in real background, leaving to native AI" }
                 return@hookMethod chain.proceed()
             }
             if (!isEligibleForForegroundAutoNext(service)) {
@@ -117,9 +117,9 @@ class ForegroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoader) {
                 runCatching {
                     val fullscreen = isInFullscreen(service)
                     openRelatePage(ctx, avid, fullscreen)
-                    Log.s("ForegroundAutoNext: opened relate page avid=$avid fullscreen=$fullscreen")
+                    Log.trace { "ForegroundAutoNext: opened relate page avid=$avid fullscreen=$fullscreen" }
                 }.onFailure {
-                    Log.s("ForegroundAutoNext: openRelatePage failed: ${it.message}")
+                    Log.trace { "ForegroundAutoNext: openRelatePage failed: ${it.message}" }
                     resumePendingCompletion(mClassLoader)
                     return@hookMethod chain.proceed()
                 }
@@ -127,7 +127,7 @@ class ForegroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoader) {
                 return@hookMethod null
             }
 
-            Log.x("ForegroundAutoNext: no playable relate avid, trying relate feed")
+            Log.trace { "ForegroundAutoNext: no playable relate avid, trying relate feed" }
             openNextRelate(mClassLoader, service, openGeneration)
             clearPendingCompletion()
             return@hookMethod null
@@ -138,12 +138,12 @@ class ForegroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoader) {
         val serviceClass =
             "com.bilibili.ship.theseus.ugc.backgroundplay.UGCBackgroundPlayService"
                 .findClassOrNull(mClassLoader) ?: run {
-                Log.x("ForegroundAutoNext: UGCBackgroundPlayService not found")
+                Log.trace { "ForegroundAutoNext: UGCBackgroundPlayService not found" }
                 return
             }
         val continuationClass = "kotlin.coroutines.Continuation".findClassOrNull(mClassLoader)
             ?: run {
-                Log.x("ForegroundAutoNext: Continuation class not found")
+                Log.trace { "ForegroundAutoNext: Continuation class not found" }
                 return
             }
 
@@ -163,18 +163,18 @@ class ForegroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoader) {
 
             if (!ForegroundAutoNextPrefs.shouldApplyAiAutoNext(service)) {
                 val scope = ForegroundAutoNextPrefs.classify(service)
-                Log.x("ForegroundAutoNext: scope=$scope disabled, native handles completion")
+                Log.trace { "ForegroundAutoNext: scope=$scope disabled, native handles completion" }
                 clearPendingCompletion()
                 return@hookMethod chain.proceed()
             }
 
             if (!isEligibleForForegroundAutoNext(service)) {
-                Log.x("ForegroundAutoNext: skip completion, not eligible foreground UGC page")
+                Log.trace { "ForegroundAutoNext: skip completion, not eligible foreground UGC page" }
                 clearPendingCompletion()
                 return@hookMethod chain.proceed()
             }
 
-            Log.s("ForegroundAutoNext: foreground completion, requesting relates")
+            Log.trace { "ForegroundAutoNext: foreground completion, requesting relates" }
             val gen = ++openGeneration
             pickCompletedForGeneration = -1
             prefetchedPick = null
@@ -183,21 +183,21 @@ class ForegroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoader) {
             pendingCompletion = chain.args.firstOrNull()
 
             runCatching { repo.javaClass.getMethod("C").invoke(repo) }
-                .onFailure { Log.x("ForegroundAutoNext: C() failed: ${it.message}") }
+                .onFailure { Log.trace { "ForegroundAutoNext: C() failed: ${it.message}" } }
 
             runCatching {
                 repo.javaClass.getMethod("G", Boolean::class.javaPrimitiveType)
                     .invoke(repo, true)
-            }.onFailure { Log.x("ForegroundAutoNext: G(true) failed: ${it.message}") }
+            }.onFailure { Log.trace { "ForegroundAutoNext: G(true) failed: ${it.message}" } }
 
             runCatching {
                 UgcBackgroundPlayReflection.invokeServiceP(service)
-            }.onFailure { Log.x("ForegroundAutoNext: p() failed: ${it.message}") }
+            }.onFailure { Log.trace { "ForegroundAutoNext: p() failed: ${it.message}" } }
 
             runCatching {
                 repo.javaClass.getMethod("E", Boolean::class.javaPrimitiveType)
                     .invoke(repo, true)
-            }.onFailure { Log.x("ForegroundAutoNext: E(true) failed: ${it.message}") }
+            }.onFailure { Log.trace { "ForegroundAutoNext: E(true) failed: ${it.message}" } }
 
             runCatching {
                 val k = repo.javaClass.getDeclaredField("k").apply { isAccessible = true }.get(repo)
@@ -206,13 +206,13 @@ class ForegroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoader) {
                 val loading = repo.javaClass.getDeclaredField("d")
                     .apply { isAccessible = true }.get(repo)
                 val aiMode = repo.javaClass.getMethod("n").invoke(repo)
-                Log.x("ForegroundAutoNext: relate-state k=$k hSize=$hSize loading=$loading aiMode=$aiMode")
-            }.onFailure { Log.x("ForegroundAutoNext: diag failed: ${it.message}") }
+                Log.trace { "ForegroundAutoNext: relate-state k=$k hSize=$hSize loading=$loading aiMode=$aiMode" }
+            }.onFailure { Log.trace { "ForegroundAutoNext: diag failed: ${it.message}" } }
 
             val yResult = runCatching { repo.javaClass.getMethod("y").invoke(repo) }
-                .onFailure { Log.x("ForegroundAutoNext: y() failed: ${it.message}") }
+                .onFailure { Log.trace { "ForegroundAutoNext: y() failed: ${it.message}" } }
                 .getOrNull()
-            Log.x("ForegroundAutoNext: y() returned $yResult")
+            Log.trace { "ForegroundAutoNext: y() returned $yResult" }
 
             cancelFallback()
             val fallbackMs = if (ForegroundAutoNextPrefs.hasActiveVideoPickPrefs()) {
@@ -231,7 +231,7 @@ class ForegroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoader) {
                         return@Runnable
                     }
                     activating = false
-                    Log.s("ForegroundAutoNext: AI relate timed out, querying relate feed")
+                    Log.trace { "ForegroundAutoNext: AI relate timed out, querying relate feed" }
                     openNextRelate(mClassLoader, service, gen)
                 }
             }
@@ -240,16 +240,16 @@ class ForegroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoader) {
 
             val suspended = getCoroutineSuspended(mClassLoader)
             if (suspended != null) {
-                Log.s("ForegroundAutoNext: x() suspended, awaiting t()")
+                Log.trace { "ForegroundAutoNext: x() suspended, awaiting t()" }
                 return@hookMethod suspended
             }
 
-            Log.s("ForegroundAutoNext: COROUTINE_SUSPENDED not found, falling through")
+            Log.trace { "ForegroundAutoNext: COROUTINE_SUSPENDED not found, falling through" }
             activating = false
             clearPendingCompletion()
             chain.proceed()
         }
-        Log.x("ForegroundAutoNext: hooked UGCBackgroundPlayService.x()")
+        Log.s("ForegroundAutoNext: hooked UGCBackgroundPlayService.x()")
     }
 
     /** Prefetch next-video pick while the current video is still playing. */
@@ -296,7 +296,7 @@ class ForegroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoader) {
             }
             null
         }
-        Log.x("ForegroundAutoNext: hooked playback prefetch")
+        Log.s("ForegroundAutoNext: hooked playback prefetch")
     }
 
     /** Cache tags/up from the view page response and prefetch while the user is watching. */
@@ -326,7 +326,7 @@ class ForegroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoader) {
             }
             result
         }
-        Log.x("ForegroundAutoNext: hooked view-page prefetch")
+        Log.s("ForegroundAutoNext: hooked view-page prefetch")
     }
 
     private fun onRepoAnchored(classLoader: ClassLoader, repo: Any, anchor: Any?) {
@@ -451,7 +451,7 @@ class ForegroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoader) {
 
         fun abortActivation(classLoader: ClassLoader, reason: String) {
             if (!activating && pendingCompletion == null && fallbackRunnable == null) return
-            Log.x("ForegroundAutoNext: abort ($reason)")
+            Log.trace { "ForegroundAutoNext: abort ($reason)" }
             openGeneration++
             activating = false
             pickCompletedForGeneration = -1
@@ -552,7 +552,7 @@ class ForegroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoader) {
                         val m = cls.getDeclaredMethod("resumeWith", resultClass)
                         m.isAccessible = true
                         m.invoke(cont, result)
-                        Log.s("ForegroundAutoNext: resumed handleCompleted")
+                        Log.trace { "ForegroundAutoNext: resumed handleCompleted" }
                         return
                     } catch (_: NoSuchMethodException) {
                         cls = cls.superclass
@@ -560,7 +560,7 @@ class ForegroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoader) {
                 }
                 error("resumeWith not found on ${cont.javaClass.name}")
             }.onFailure {
-                Log.s("ForegroundAutoNext: resume failed: ${it.message}")
+                Log.trace { "ForegroundAutoNext: resume failed: ${it.message}" }
                 Log.e(it)
             }.also {
                 suppressOldPageTeardown = false
@@ -592,7 +592,7 @@ class ForegroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoader) {
                     .firstOrNull { it.name == "j" && it.parameterCount == 1 }
                     ?.apply { isAccessible = true } ?: return@runCatching false
                 val next = jMethod.invoke(episodeRepo, current)
-                Log.x("ForegroundAutoNext: hasNextEpisode? current[$curId] listSize=$listSize next=${next != null}")
+                Log.trace { "ForegroundAutoNext: hasNextEpisode? current[$curId] listSize=$listSize next=${next != null}" }
                 next != null
             }.getOrDefault(false)
         }
@@ -602,7 +602,7 @@ class ForegroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoader) {
             activating = false
             val ctx = UgcBackgroundPlayReflection.context(service) as? Context
             if (ctx == null) {
-                Log.s("ForegroundAutoNext: no context for relate feed")
+                Log.trace { "ForegroundAutoNext: no context for relate feed" }
                 resumePendingCompletion(classLoader)
                 return
             }
@@ -626,23 +626,23 @@ class ForegroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoader) {
             }
             val avid = getCurrentAvid(service)
             if (avid == null || avid <= 0L) {
-                Log.s("ForegroundAutoNext: no current avid for relate feed")
+                Log.trace { "ForegroundAutoNext: no current avid for relate feed" }
                 resumePendingCompletion(classLoader)
                 return
             }
             val fullscreen = isInFullscreen(service)
             netExecutor.execute {
                 val uri = runCatching { requestRelateUri(classLoader, avid) }
-                    .onFailure { Log.s("ForegroundAutoNext: relate feed failed: ${it.message}") }
+                    .onFailure { Log.trace { "ForegroundAutoNext: relate feed failed: ${it.message}" } }
                     .getOrNull()
                 mainHandler.post {
                     if (generation != openGeneration) {
-                        Log.x("ForegroundAutoNext: stale relate feed open, cancelled")
+                        Log.trace { "ForegroundAutoNext: stale relate feed open, cancelled" }
                         resumePendingCompletion(classLoader)
                         return@post
                     }
                     if (!isEligibleForForegroundAutoNext(service)) {
-                        Log.x("ForegroundAutoNext: relate feed open skipped, not eligible")
+                        Log.trace { "ForegroundAutoNext: relate feed open skipped, not eligible" }
                         resumePendingCompletion(classLoader)
                         return@post
                     }
@@ -650,14 +650,14 @@ class ForegroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoader) {
                         runCatching {
                             openUri(ctx, uri, fullscreen)
                             finishSourceActivity(ctx)
-                            Log.s("ForegroundAutoNext: opened relate feed uri=$uri fullscreen=$fullscreen")
+                            Log.trace { "ForegroundAutoNext: opened relate feed uri=$uri fullscreen=$fullscreen" }
                         }.onFailure {
-                            Log.s("ForegroundAutoNext: openUri failed: ${it.message}")
+                            Log.trace { "ForegroundAutoNext: openUri failed: ${it.message}" }
                             resumePendingCompletion(classLoader)
                         }
                         clearPendingCompletion()
                     } else {
-                        Log.s("ForegroundAutoNext: relate feed empty for avid=$avid")
+                        Log.trace { "ForegroundAutoNext: relate feed empty for avid=$avid" }
                         resumePendingCompletion(classLoader)
                     }
                 }
@@ -680,7 +680,7 @@ class ForegroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoader) {
         ) {
             val currentAvid = getCurrentAvid(service)
             if (currentAvid == null || currentAvid <= 0L) {
-                Log.s("ForegroundAutoNext: no current avid for preference pick")
+                Log.trace { "ForegroundAutoNext: no current avid for preference pick" }
                 resumePendingCompletion(classLoader)
                 return
             }
@@ -695,17 +695,17 @@ class ForegroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoader) {
                 val picked = runPreferencePick(classLoader, service, currentAvid)
                 mainHandler.post {
                     if (generation != openGeneration || pickCompletedForGeneration == generation) {
-                        Log.x("ForegroundAutoNext: stale preference pick, cancelled")
+                        Log.trace { "ForegroundAutoNext: stale preference pick, cancelled" }
                         resumePendingCompletion(classLoader)
                         return@post
                     }
                     if (!isEligibleForForegroundAutoNext(service)) {
-                        Log.x("ForegroundAutoNext: preference pick skipped, not eligible")
+                        Log.trace { "ForegroundAutoNext: preference pick skipped, not eligible" }
                         resumePendingCompletion(classLoader)
                         return@post
                     }
                     if (picked == null) {
-                        Log.s("ForegroundAutoNext: preference pick found nothing for avid=$currentAvid")
+                        Log.trace { "ForegroundAutoNext: preference pick found nothing for avid=$currentAvid" }
                         resumePendingCompletion(classLoader)
                         return@post
                     }
@@ -743,15 +743,11 @@ class ForegroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoader) {
                         playbackPrefetchSourceAvid = sourceAvid
                         playbackPrefetchPick = picked
                         playbackPrefetchRefUpMid = refMeta.upMid
-                        Log.s(
-                            "ForegroundAutoNext: playback prefetch ($reason) " +
-                                "source=$sourceAvid refUp=${refMeta.upMid} -> ${picked.avid} upMid=${picked.upMid}",
-                        )
+                        Log.trace { "ForegroundAutoNext: playback prefetch ($reason) " +
+                                "source=$sourceAvid refUp=${refMeta.upMid} -> ${picked.avid} upMid=${picked.upMid}" }
                     } else if (picked != null) {
-                        Log.x(
-                            "ForegroundAutoNext: playback prefetch ($reason) rejected " +
-                                "avid=${picked.avid} upMid=${picked.upMid} refUp=${refMeta.upMid}",
-                        )
+                        Log.trace { "ForegroundAutoNext: playback prefetch ($reason) rejected " +
+                                "avid=${picked.avid} upMid=${picked.upMid} refUp=${refMeta.upMid}" }
                     }
                 }
             }
@@ -768,17 +764,15 @@ class ForegroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoader) {
                 if (refMeta.upMid != null && playbackPrefetchRefUpMid != null &&
                     refMeta.upMid != playbackPrefetchRefUpMid
                 ) {
-                    Log.x("ForegroundAutoNext: playback prefetch stale refUp, discarded")
+                    Log.trace { "ForegroundAutoNext: playback prefetch stale refUp, discarded" }
                     playbackPrefetchPick = null
                     playbackPrefetchSourceAvid = -1L
                     playbackPrefetchRefUpMid = null
                     return null
                 }
                 if (!isPickValidForPrefs(pick, refMeta)) {
-                    Log.x(
-                        "ForegroundAutoNext: playback prefetch failed validation " +
-                            "avid=${pick.avid} upMid=${pick.upMid} refUp=${refMeta.upMid}",
-                    )
+                    Log.trace { "ForegroundAutoNext: playback prefetch failed validation " +
+                            "avid=${pick.avid} upMid=${pick.upMid} refUp=${refMeta.upMid}" }
                     playbackPrefetchPick = null
                     playbackPrefetchSourceAvid = -1L
                     playbackPrefetchRefUpMid = null
@@ -827,7 +821,7 @@ class ForegroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoader) {
                     if (generation != openGeneration || pickCompletedForGeneration == generation) return@post
                     if (!isEligibleForForegroundAutoNext(service)) return@post
                     val ctx = UgcBackgroundPlayReflection.context(service) as? Context ?: return@post
-                    Log.s("ForegroundAutoNext: completion used playback prefetch avid=${cached.avid}")
+                    Log.trace { "ForegroundAutoNext: completion used playback prefetch avid=${cached.avid}" }
                     applyPreferencePick(classLoader, service, ctx, generation, cached)
                 }
                 return
@@ -842,7 +836,7 @@ class ForegroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoader) {
                     if (!activating || generation != openGeneration) return@post
                     if (!isEligibleForForegroundAutoNext(service)) return@post
                     val ctx = UgcBackgroundPlayReflection.context(service) as? Context ?: return@post
-                    Log.s("ForegroundAutoNext: prefetch ready, opening early avid=${picked.avid}")
+                    Log.trace { "ForegroundAutoNext: prefetch ready, opening early avid=${picked.avid}" }
                     applyPreferencePick(classLoader, service, ctx, generation, picked)
                 }
             }
@@ -875,13 +869,11 @@ class ForegroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoader) {
                 } else {
                     openRelatePage(ctx, picked.avid, fullscreen)
                 }
-                Log.s(
-                    "ForegroundAutoNext: preference pick avid=${picked.avid} " +
+                Log.trace { "ForegroundAutoNext: preference pick avid=${picked.avid} " +
                         "portrait=${picked.portrait} upMid=${picked.upMid} tags=${picked.tagNames.size} " +
-                        "prefs=${ForegroundAutoNextPrefs.videoPrefsSummary()}",
-                )
+                        "prefs=${ForegroundAutoNextPrefs.videoPrefsSummary()}" }
             }.onFailure {
-                Log.s("ForegroundAutoNext: preference open failed: ${it.message}")
+                Log.trace { "ForegroundAutoNext: preference open failed: ${it.message}" }
                 pickCompletedForGeneration = -1
                 resumePendingCompletion(classLoader)
                 return
@@ -907,20 +899,18 @@ class ForegroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoader) {
             val continuous = runCatching {
                 requestContinuousPlayCandidates(classLoader, repo, service)
             }.onFailure {
-                Log.s("ForegroundAutoNext: ContinuousPlay failed: ${it.message}")
+                Log.trace { "ForegroundAutoNext: ContinuousPlay failed: ${it.message}" }
             }.getOrDefault(emptyList())
             val feed = continuous.ifEmpty {
                 runCatching { requestRelateCandidates(classLoader, currentAvid) }
-                    .onFailure { Log.s("ForegroundAutoNext: relate feed failed: ${it.message}") }
+                    .onFailure { Log.trace { "ForegroundAutoNext: relate feed failed: ${it.message}" } }
                     .getOrDefault(emptyList())
             }
             val aiAvids = collectAiAvidsFast(repo, service)
             val source = if (continuous.isNotEmpty()) "ContinuousPlay" else "RelatesFeed"
             val refMeta = buildReferenceMeta(classLoader, repo, service, currentAvid)
-            Log.x(
-                "ForegroundAutoNext: pick source=$source ai=${aiAvids.size} feed=${feed.size} " +
-                    "refUp=${refMeta.upMid} refTags=${refMeta.tagNames.size}",
-            )
+            Log.trace { "ForegroundAutoNext: pick source=$source ai=${aiAvids.size} feed=${feed.size} " +
+                    "refUp=${refMeta.upMid} refTags=${refMeta.tagNames.size}" }
             return when {
                 !ForegroundAutoNextPrefs.needsNetworkMeta() ->
                     pickByOrientationOnly(aiAvids, feed, refMeta.portrait)
@@ -1017,10 +1007,8 @@ class ForegroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoader) {
             if (ForegroundAutoNextPrefs.tagPref() != ForegroundAutoNextPrefs.TagPref.NONE) {
                 findPreferenceMatch(aiAvidsInOrder, feed, refMeta, tagStrict = false)?.let { return it }
             }
-            Log.x(
-                "ForegroundAutoNext: no preference match refUp=${refMeta.upMid} " +
-                    "feed=${feed.size} ai=${aiAvidsInOrder.size}",
-            )
+            Log.trace { "ForegroundAutoNext: no preference match refUp=${refMeta.upMid} " +
+                    "feed=${feed.size} ai=${aiAvidsInOrder.size}" }
             return null
         }
 
@@ -1217,7 +1205,7 @@ class ForegroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoader) {
             for (root in roots) {
                 UnitedScreenStateReflection.findScreenStateRepo(root)?.let { repo ->
                     val fullscreen = UnitedScreenStateReflection.readFullscreen(repo)
-                    Log.x("ForegroundAutoNext: isInFullscreen=$fullscreen (screenstate)")
+                    Log.trace { "ForegroundAutoNext: isInFullscreen=$fullscreen (screenstate)" }
                     return fullscreen
                 }
             }
@@ -1228,7 +1216,7 @@ class ForegroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoader) {
                             .invoke(container)
                         render.javaClass.getMethod("isInWholeSceneMode").invoke(render) as Boolean
                     }.getOrDefault(false)
-                    Log.x("ForegroundAutoNext: isInFullscreen=$fullscreen (wholeScene)")
+                    Log.trace { "ForegroundAutoNext: isInFullscreen=$fullscreen (wholeScene)" }
                     return fullscreen
                 }
             }

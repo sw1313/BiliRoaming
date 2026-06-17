@@ -35,7 +35,7 @@ class HideVipCenterHook(classLoader: ClassLoader) : BaseHook(classLoader) {
 
     override fun startHook() {
         if (!ePrefs.getBoolean("hide_vip_center", false)) return
-        Log.d("startHook: HideVipCenter")
+        Log.s("startHook: HideVipCenter")
 
         hookOfficialVipRefactoringManager()
         hookVipBanner()
@@ -58,7 +58,7 @@ class HideVipCenterHook(classLoader: ClassLoader) : BaseHook(classLoader) {
             chain.args.firstOrNull()?.clearVipCenterData()
             chain.proceed()
         }
-        Log.d("HideVipCenter: hooked official vip refactoring manager ${managerClass.name}#${renderMethod.name}")
+        Log.d { "HideVipCenter: hooked official vip refactoring manager ${managerClass.name}#${renderMethod.name}" }
     }
 
     private fun hookVipBanner() {
@@ -84,12 +84,12 @@ class HideVipCenterHook(classLoader: ClassLoader) : BaseHook(classLoader) {
                     it.parameterTypes[0] == accountMineClass &&
                     it.parameterTypes[1] == Boolean::class.javaPrimitiveType
             }
-        Log.d("MineVipModuleManager hook methods: ${methods.joinToString { it.name }}")
+        Log.d { "MineVipModuleManager hook methods: ${methods.joinToString { it.name }}" }
         methods.forEach { method ->
             method.hookMethod { chain ->
                 chain.thisObject?.hideVipManagerRoot()
                 chain.args.getOrNull(0)?.clearVipCenterData()
-                null
+                chain.proceed()
             }
         }
     }
@@ -107,7 +107,7 @@ class HideVipCenterHook(classLoader: ClassLoader) : BaseHook(classLoader) {
                         method.parameterTypes.any { it == accountMineClass }
                     )
         }
-        Log.d("MineVipEntranceView hook methods: ${methods.joinToString { it.name }}")
+        Log.d { "MineVipEntranceView hook methods: ${methods.joinToString { it.name }}" }
         methods.forEach { method ->
             method.hookMethod { chain ->
                 (chain.thisObject as? View)?.visibility = View.GONE
@@ -117,7 +117,7 @@ class HideVipCenterHook(classLoader: ClassLoader) : BaseHook(classLoader) {
                         arg is View -> arg.visibility = View.GONE
                     }
                 }
-                null
+                chain.proceed()
             }
         }
     }

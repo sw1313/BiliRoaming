@@ -41,7 +41,7 @@ object SponsorBlockMenuHost {
             val token = widget.callMethodOrNull("getToken") ?: return
             service.callMethodOrNull("hideWidget", token)
         }.onFailure {
-            Log.w("SponsorBlock: hide player setting widget failed: ${it.message}")
+            Log.w { "SponsorBlock: hide player setting widget failed: ${it.message}" }
         }
     }
 }

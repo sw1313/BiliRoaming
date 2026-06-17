@@ -88,28 +88,28 @@ class BlockChargingVideoHook(classLoader: ClassLoader) : BaseHook(classLoader) {
                 !shouldBlockAvid(avid)
             }
             if (filtered.size < episodes.size) {
-                Log.d("BlockChargingVideo: AI episode list removed ${episodes.size - filtered.size} charging item(s)")
+                Log.d { "BlockChargingVideo: AI episode list removed ${episodes.size - filtered.size} charging item(s)" }
                 chain.args[1] = ArrayList(filtered)
             }
             chain.proceed()
         }
-        Log.d("BlockChargingVideo: hooked AI episode list on ${repoClass.name}.${anchorMethod.name}")
+        Log.d { "BlockChargingVideo: hooked AI episode list on ${repoClass.name}.${anchorMethod.name}" }
     }
 
     // region 竖屏视频流
     private fun hookStoryFeed() {
         val storyClass = instance.storyPagerPlayerClass ?: run {
-            Log.w("BlockChargingVideo: StoryPagerPlayer not found")
+            Log.w { "BlockChargingVideo: StoryPagerPlayer not found" }
             return
         }
         val listMethods = storyClass.declaredMethods.filter { method ->
             method.parameterTypes.isNotEmpty() && method.parameterTypes[0] == List::class.java
         }
         if (listMethods.isEmpty()) {
-            Log.w("BlockChargingVideo: no List-param method on StoryPagerPlayer")
+            Log.w { "BlockChargingVideo: no List-param method on StoryPagerPlayer" }
             return
         }
-        Log.d("BlockChargingVideo story methods: ${listMethods.joinToString { it.name }}")
+        Log.d { "BlockChargingVideo story methods: ${listMethods.joinToString { it.name }}" }
         storyClass.hookAllMethods(listMethods) { chain ->
             @Suppress("UNCHECKED_CAST")
             val primary = chain.args.getOrNull(0) as? MutableList<Any?>
@@ -136,7 +136,7 @@ class BlockChargingVideoHook(classLoader: ClassLoader) : BaseHook(classLoader) {
                 i++
             }
         }
-        if (removed > 0) Log.d("BlockChargingVideo: removed $removed story item(s)")
+        if (removed > 0) Log.d { "BlockChargingVideo: removed $removed story item(s)" }
     }
 
     private fun isChargingStory(item: Any): Boolean = isChargingStoryItem(item)
@@ -180,7 +180,7 @@ class BlockChargingVideoHook(classLoader: ClassLoader) : BaseHook(classLoader) {
             }
             result
         }
-        Log.d("BlockChargingVideo: hooked view.v1")
+        Log.d { "BlockChargingVideo: hooked view.v1" }
     }
 
     private fun isChargingRelateV1(item: Any): Boolean {
@@ -191,11 +191,9 @@ class BlockChargingVideoHook(classLoader: ClassLoader) : BaseHook(classLoader) {
         val aid = (item.callMethodOrNull("getAid") as? Long) ?: 0L
         val viaKnownAid = aid > 0L && knownChargingAids.contains(aid)
         if (logEnabled) {
-            Log.d(
-                "ChargingRelateV1 goto=${item.callMethodOrNull("getGoto")} aid=$aid " +
+            Log.d { "ChargingRelateV1 goto=${item.callMethodOrNull("getGoto")} aid=$aid " +
                     "title=${item.callMethodOrNull("getTitle")} " +
-                    "powerIcon=$hasPowerIcon badge=$badge badgeStyle=$badgeStyleText knownAid=$viaKnownAid",
-            )
+                    "powerIcon=$hasPowerIcon badge=$badge badgeStyle=$badgeStyleText knownAid=$viaKnownAid" }
         }
         return hasPowerIcon ||
             badge.containsCharge() ||
@@ -211,7 +209,7 @@ class BlockChargingVideoHook(classLoader: ClassLoader) : BaseHook(classLoader) {
     private fun isPromotedRelateV1(item: Any): Boolean {
         val from = item.callMethodOrNullAs<String>("getFrom").orEmpty()
         val promoted = from == PROMOTED_FROM
-        if (logEnabled && promoted) Log.d("PromotedRelateV1 removed from=$from")
+        if (logEnabled && promoted) Log.d { "PromotedRelateV1 removed from=$from" }
         return promoted
     }
     // endregion
@@ -249,7 +247,7 @@ class BlockChargingVideoHook(classLoader: ClassLoader) : BaseHook(classLoader) {
             }
             result
         }
-        Log.d("BlockChargingVideo: hooked viewunite.v1")
+        Log.d { "BlockChargingVideo: hooked viewunite.v1" }
     }
 
     private fun filterUniteViewRelates(viewReply: Any) {
@@ -289,7 +287,7 @@ class BlockChargingVideoHook(classLoader: ClassLoader) : BaseHook(classLoader) {
      */
     private fun hookPlayViewCharging() {
         val moss = instance.playerMossClass ?: run {
-            Log.w("BlockChargingVideo: PlayerMoss not found, skip play-based charging confirm")
+            Log.w { "BlockChargingVideo: PlayerMoss not found, skip play-based charging confirm" }
             return
         }
         val reqClass = instance.playViewUniteReqClass
@@ -303,7 +301,7 @@ class BlockChargingVideoHook(classLoader: ClassLoader) : BaseHook(classLoader) {
             result
         }
         if (handles.isNotEmpty()) {
-            Log.d("BlockChargingVideo: hooked PlayerMoss.executePlayViewUnite x${handles.size} for charging confirm")
+            Log.d { "BlockChargingVideo: hooked PlayerMoss.executePlayViewUnite x${handles.size} for charging confirm" }
         }
     }
 
@@ -312,7 +310,7 @@ class BlockChargingVideoHook(classLoader: ClassLoader) : BaseHook(classLoader) {
         if (!replyIsChargingLocked(reply)) return
         val aid = extractReqAid(req)
         if (rememberChargingAid(aid)) {
-            Log.d("BlockChargingVideo: cached charging aid=$aid (playViewUnite limit)")
+            Log.d { "BlockChargingVideo: cached charging aid=$aid (playViewUnite limit)" }
         }
     }
 
@@ -364,7 +362,7 @@ class BlockChargingVideoHook(classLoader: ClassLoader) : BaseHook(classLoader) {
     // region 首页推荐
     private fun hookHomeFeed() {
         val convertClass = instance.pegasusConvertClass ?: run {
-            Log.w("BlockChargingVideo: pegasus convert class not found")
+            Log.w { "BlockChargingVideo: pegasus convert class not found" }
             return
         }
         convertClass.hookMethod("convert", Any::class.java) { chain ->
@@ -377,11 +375,11 @@ class BlockChargingVideoHook(classLoader: ClassLoader) : BaseHook(classLoader) {
                 val removed = items.size
                 items.removeAll { isChargingFeedItem(it) }
                 val diff = removed - items.size
-                if (diff > 0) Log.d("BlockChargingVideo: removed $diff feed item(s)")
+                if (diff > 0) Log.d { "BlockChargingVideo: removed $diff feed item(s)" }
             }
             result
         }
-        Log.d("BlockChargingVideo: hooked home feed on ${convertClass.name}")
+        Log.d { "BlockChargingVideo: hooked home feed on ${convertClass.name}" }
     }
 
     /** Pegasus 普通视频卡片的 aid：优先 param（av 卡片即 aid 字符串），回退到 uri 里的 video/<aid>。 */
@@ -399,7 +397,7 @@ class BlockChargingVideoHook(classLoader: ClassLoader) : BaseHook(classLoader) {
         // 联网精准识别命中的 aid 直接删（首页卡片本身也不带结构化充电标记）。
         val aid = feedCardAid(item) ?: 0L
         if (aid > 0L && aid in knownChargingAids) {
-            if (logEnabled) Log.d("ChargingFeed removed by aid=$aid (view api)")
+            if (logEnabled) Log.d { "ChargingFeed removed by aid=$aid (view api)" }
             return true
         }
         var hit = false
@@ -420,14 +418,12 @@ class BlockChargingVideoHook(classLoader: ClassLoader) : BaseHook(classLoader) {
             if (text.containsCharge() || link.contains(UPOWER_KEYWORD)) hit = true
         }
         if (logEnabled) {
-            Log.d(
-                "ChargingFeed goto=${item.getJsonField("goto")} " +
+            Log.d { "ChargingFeed goto=${item.getJsonField("goto")} " +
                     "cardType=${item.getJsonField("card_type")} " +
-                    "title=${item.getJsonField("title")} hit=$hit badges=$seen",
-            )
+                    "title=${item.getJsonField("title")} hit=$hit badges=$seen" }
             if (hit) {
                 val json = instance.fastJsonClass?.callStaticMethodOrNull("toJSONString", item) as? String
-                if (json != null) Log.d("ChargingFeed dump >>> ${json.truncate()}")
+                if (json != null) Log.d { "ChargingFeed dump >>> ${json.truncate()}" }
             }
         }
         return hit
@@ -458,7 +454,7 @@ class BlockChargingVideoHook(classLoader: ClassLoader) : BaseHook(classLoader) {
                 ?: arc.callMethodOrNull("getRights")?.callMethodOrNull("getIsChargingPay")
             ) == true
         if (charging && rememberChargingAid(aid)) {
-            Log.d("BlockChargingVideo: cached charging aid=$aid ($tag)")
+            Log.d { "BlockChargingVideo: cached charging aid=$aid ($tag)" }
         }
     }
 
@@ -470,11 +466,9 @@ class BlockChargingVideoHook(classLoader: ClassLoader) : BaseHook(classLoader) {
         val isChargingPay = arc?.callMethodOrNull("getRight")?.callMethodOrNull("getIsChargingPay")
             ?: arc?.callMethodOrNull("getRights")?.callMethodOrNull("getIsChargingPay")
         val reqUser = viewReply.callMethodOrNull("getReqUser")
-        Log.d(
-            "ChargingMain($tag) aid=$aid title=$title isChargingPay=$isChargingPay",
-        )
-        if (arc != null) Log.d("ChargingMain($tag) arc >>> ${arc.protoSummary()}")
-        if (reqUser != null) Log.d("ChargingMain($tag) reqUser >>> ${reqUser.protoSummary()}")
+        Log.d { "ChargingMain($tag) aid=$aid title=$title isChargingPay=$isChargingPay" }
+        if (arc != null) Log.d { "ChargingMain($tag) arc >>> ${arc.protoSummary()}" }
+        if (reqUser != null) Log.d { "ChargingMain($tag) reqUser >>> ${reqUser.protoSummary()}" }
     }
 
     /** 优先按 fastjson @JSONField(name) 取字段，找不到再退回到 Java 字段名。 */
@@ -544,7 +538,7 @@ class BlockChargingVideoHook(classLoader: ClassLoader) : BaseHook(classLoader) {
             if (!blockChargingEnabled) return items.filterNotNull()
             val filtered = items.filterNotNull().filter { !isChargingStoryItem(it) }
             val removed = items.size - filtered.size
-            if (removed > 0) Log.d("BlockChargingVideo: story auto-next removed $removed charging item(s)")
+            if (removed > 0) Log.d { "BlockChargingVideo: story auto-next removed $removed charging item(s)" }
             return filtered
         }
 
@@ -597,7 +591,7 @@ class BlockChargingVideoHook(classLoader: ClassLoader) : BaseHook(classLoader) {
                     when (queryIsUpowerExclusive(aid)) {
                         true -> {
                             if (rememberChargingAid(aid)) {
-                                Log.d("BlockChargingVideo: cached charging aid=$aid (view api)")
+                                Log.d { "BlockChargingVideo: cached charging aid=$aid (view api)" }
                             }
                         }
                         false -> knownNonChargingAids.add(aid)

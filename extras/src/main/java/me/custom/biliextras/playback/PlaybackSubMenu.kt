@@ -20,7 +20,7 @@ object PlaybackSubMenu {
         runCatching {
             buildAndShowForegroundAutoNext(activity, context)
         }.onFailure {
-            Log.w("Playback submenu failed: ${it.message}")
+            Log.w { "Playback submenu failed: ${it.message}" }
         }
     }
 
@@ -51,7 +51,7 @@ object PlaybackSubMenu {
         runCatching {
             buildAndShowForegroundPrefs(activity, context)
         }.onFailure {
-            Log.w("Playback prefs submenu failed: ${it.message}")
+            Log.w { "Playback prefs submenu failed: ${it.message}" }
         }
     }
 

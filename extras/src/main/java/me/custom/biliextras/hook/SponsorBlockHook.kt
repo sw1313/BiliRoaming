@@ -155,7 +155,7 @@ class SponsorBlockHook(classLoader: ClassLoader) : BaseHook(classLoader) {
             result
         }
         if (unaryHandles.isNotEmpty()) {
-            Log.x("SponsorBlock: hooked PlayerMoss.executePlayViewUnite x${unaryHandles.size}")
+            Log.s("SponsorBlock: hooked PlayerMoss.executePlayViewUnite x${unaryHandles.size}")
         }
 
         if (handlerClass != null) {
@@ -175,7 +175,7 @@ class SponsorBlockHook(classLoader: ClassLoader) : BaseHook(classLoader) {
                 chain.proceed(args)
             }
             if (streamHandles.isNotEmpty()) {
-                Log.x("SponsorBlock: hooked PlayerMoss.playViewUnite (stream handler) x${streamHandles.size}")
+                Log.s("SponsorBlock: hooked PlayerMoss.playViewUnite (stream handler) x${streamHandles.size}")
             }
         }
     }
@@ -208,12 +208,13 @@ class SponsorBlockHook(classLoader: ClassLoader) : BaseHook(classLoader) {
         if (x2Method != null) {
             x2Method.hookMethod { chain ->
                 val result = chain.proceed()
+                // Official onPageSelected → x2; proceed-first keeps Story bg-resume x2 guard compatible.
                 updateFromStoryItem(chain.thisObject.callMethodOrNull("F1"))
                 result
             }
-            Log.x("SponsorBlock: hooked StoryPagerPlayer.x2 for page-change detection")
+            Log.s("SponsorBlock: hooked StoryPagerPlayer.x2 for page-change detection")
         }
-        Log.x("SponsorBlock: hooked StoryPagerPlayer.$addVideoName for video change detection")
+        Log.s("SponsorBlock: hooked StoryPagerPlayer.$addVideoName for video change detection")
     }
 
     /** Resolve a story item's bvid/cid and (re)bind SponsorBlock to it. */
@@ -234,17 +235,15 @@ class SponsorBlockHook(classLoader: ClassLoader) : BaseHook(classLoader) {
 
     private fun hookPlayerCore() {
         val methods = instance.playerCoreMethods ?: run {
-            Log.x("SponsorBlock: player core methods not found")
+            Log.trace { "SponsorBlock: player core methods not found" }
             return
         }
         if (methods.currentPosition == null) {
-            Log.x("SponsorBlock: current position method not found")
+            Log.trace { "SponsorBlock: current position method not found" }
         }
-        Log.x(
-            "SponsorBlock: player core=${methods.serviceClass.name}, " +
+        Log.trace { "SponsorBlock: player core=${methods.serviceClass.name}, " +
                 "seek=${methods.seekTo.name}/${methods.seekTo.parameterCount}, " +
-                "position=${methods.currentPosition?.name}",
-        )
+                "position=${methods.currentPosition?.name}" }
         methods.serviceClass.hookAllConstructors { chain ->
             chain.proceed()
             updatePlayerService(chain.thisObject, checkNow = true)
@@ -310,7 +309,7 @@ class SponsorBlockHook(classLoader: ClassLoader) : BaseHook(classLoader) {
             progressObserver = observer
             progressObserverService = service
             syncPollInterval()
-            Log.x("SponsorBlock: registered official PlayerProgressObserver on ${service.javaClass.name}")
+            Log.s("SponsorBlock: registered official PlayerProgressObserver on ${service.javaClass.name}")
         }.onFailure { Log.e(it) }
     }
 
@@ -338,7 +337,7 @@ class SponsorBlockHook(classLoader: ClassLoader) : BaseHook(classLoader) {
         if (aidBvid != null && cid > 0) {
             updateVideo(VideoKey(aidBvid, cid))
         } else {
-            Log.d("SponsorBlock: view reply missing bvid/cid, bvid=$bvid cid=$cid")
+            Log.d { "SponsorBlock: view reply missing bvid/cid, bvid=$bvid cid=$cid" }
         }
     }
 
@@ -351,7 +350,7 @@ class SponsorBlockHook(classLoader: ClassLoader) : BaseHook(classLoader) {
             ?: req.callMethodOrNullAs<Long?>("getAid")?.takeIf { it > 0 }?.let(::av2bv)
         if (!bvid.isNullOrBlank() && bvid.startsWith("BV")) {
             pendingBvid = bvid
-            Log.x("SponsorBlock: pending bvid from view req $bvid")
+            Log.trace { "SponsorBlock: pending bvid from view req $bvid" }
         }
     }
 
@@ -397,7 +396,7 @@ class SponsorBlockHook(classLoader: ClassLoader) : BaseHook(classLoader) {
         if (current != null && current.cid != cid) {
             updateVideo(current.copy(cid = cid))
         } else if (current == null) {
-            Log.d("SponsorBlock: playView cid=$cid but current bvid is null")
+            Log.d { "SponsorBlock: playView cid=$cid but current bvid is null" }
         }
     }
 
@@ -434,7 +433,7 @@ class SponsorBlockHook(classLoader: ClassLoader) : BaseHook(classLoader) {
             updateVideo(VideoKey(bvid, cid, durationMs.coerceAtLeast(0L)))
             schedulePlayerCorePrewarm()
         } else {
-            Log.x("SponsorBlock: playView reply cid=$cid but bvid is null")
+            Log.trace { "SponsorBlock: playView reply cid=$cid but bvid is null" }
         }
     }
 
@@ -474,7 +473,7 @@ class SponsorBlockHook(classLoader: ClassLoader) : BaseHook(classLoader) {
         fetchingKey = video
         val categories = SponsorBlockPrefs.requestCategories
         if (categories.isEmpty()) {
-            Log.x("SponsorBlock: no SponsorBlock category enabled")
+            Log.trace { "SponsorBlock: no SponsorBlock category enabled" }
             return
         }
         SponsorBlockBackground.submit {
@@ -493,16 +492,16 @@ class SponsorBlockHook(classLoader: ClassLoader) : BaseHook(classLoader) {
                 }
                 val error = result.exceptionOrNull()?.message
                 if (currentSegments.isNotEmpty() || error != null) {
-                    Log.x("SponsorBlock: ${video.bvid}/${video.cid}, segments=${currentSegments.size}, error=$error")
+                    Log.trace { "SponsorBlock: ${video.bvid}/${video.cid}, segments=${currentSegments.size}, error=$error" }
                 }
                 if (currentSegments.isNotEmpty() && playerCoreService == null) {
-                    Log.x("SponsorBlock: segments ready but player service is not captured yet")
+                    Log.trace { "SponsorBlock: segments ready but player service is not captured yet" }
                 }
                 checkAndSkip()
                 if (result.isFailure && currentVideo?.sameVideo(video) == true) {
                     handler.postDelayed({
                         if (currentVideo?.sameVideo(video) == true && fetchingKey == null) {
-                            Log.x("SponsorBlock: retry fetch after failure for ${video.bvid}/${video.cid}")
+                            Log.trace { "SponsorBlock: retry fetch after failure for ${video.bvid}/${video.cid}" }
                             fetchSegments(currentVideo ?: video)
                         }
                     }, FETCH_RETRY_DELAY_MS)
@@ -562,10 +561,8 @@ class SponsorBlockHook(classLoader: ClassLoader) : BaseHook(classLoader) {
         val resolvedDuration = durationMs?.takeIf { it > 0L } ?: positionSnapshot(service).let { positions ->
             (positions["getRealDuration"] ?: positions["getDuration"])?.takeIf { it > 0L }
         }
-        Log.x(
-            "SponsorBlock: hit segment key=$key, position=${positionMs}ms, " +
-                "range=${startMs}-${endMs}ms, service=${service.javaClass.name}#${System.identityHashCode(service)}",
-        )
+        Log.trace { "SponsorBlock: hit segment key=$key, position=${positionMs}ms, " +
+                "range=${startMs}-${endMs}ms, service=${service.javaClass.name}#${System.identityHashCode(service)}" }
         lastSkipAtMs = now
         skippedSegmentUntilMs[key] = now + cooldownForSegment(segment, resolvedDuration)
         seekTo(service, segment, resolvedDuration)
@@ -616,7 +613,7 @@ class SponsorBlockHook(classLoader: ClassLoader) : BaseHook(classLoader) {
         val methods = instance.playerCoreMethods ?: return
         val targetMs = segment.startMs.toInt().coerceAtLeast(0)
         invokeSeek(methods.seekTo, service, targetMs, false).onFailure {
-            Log.x("SponsorBlock: seek to start failed target=$targetMs error=${it.message}")
+            Log.trace { "SponsorBlock: seek to start failed target=$targetMs error=${it.message}" }
             Log.toast("跳转到起点失败")
         }
     }
@@ -664,10 +661,8 @@ class SponsorBlockHook(classLoader: ClassLoader) : BaseHook(classLoader) {
                 }
             }
         }.onFailure {
-            Log.x(
-                "SponsorBlock: seek primary failed method=${methodSignature(methods.seekTo)}, " +
-                    "target=$targetMs, before=$beforeMs, error=${it.javaClass.name}: ${it.message}",
-            )
+            Log.trace { "SponsorBlock: seek primary failed method=${methodSignature(methods.seekTo)}, " +
+                    "target=$targetMs, before=$beforeMs, error=${it.javaClass.name}: ${it.message}" }
             Log.e(it)
         }
     }
@@ -743,12 +738,10 @@ class SponsorBlockHook(classLoader: ClassLoader) : BaseHook(classLoader) {
             val afterMs = readPositionMs(service, methods)
             if (afterMs != null && kotlin.math.abs(afterMs - targetMs) > 3000 && methods.seekTo.parameterCount == 2) {
                 invokeSeek(methods.seekTo, service, targetMs, true).onSuccess {
-                    Log.x("SponsorBlock: seek retry ok method=${methodSignature(methods.seekTo)}, bool=true, target=$targetMs")
+                    Log.trace { "SponsorBlock: seek retry ok method=${methodSignature(methods.seekTo)}, bool=true, target=$targetMs" }
                 }.onFailure {
-                    Log.x(
-                        "SponsorBlock: seek retry failed method=${methodSignature(methods.seekTo)}, " +
-                            "target=$targetMs, error=${it.javaClass.name}: ${it.message}",
-                    )
+                    Log.trace { "SponsorBlock: seek retry failed method=${methodSignature(methods.seekTo)}, " +
+                            "target=$targetMs, error=${it.javaClass.name}: ${it.message}" }
                     Log.e(it)
                 }
             }

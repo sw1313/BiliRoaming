@@ -46,14 +46,13 @@ class SponsorBlockProgressHook(classLoader: ClassLoader) : BaseHook(classLoader)
             }
             result
         }
-        Log.x("SponsorBlockProgress: hooked ProgressBar.onDraw + SeekBar.onTouchEvent")
+        Log.s("SponsorBlockProgress: hooked ProgressBar.onDraw + SeekBar.onTouchEvent")
     }
 
     private fun drawSegments(progressBar: ProgressBar?, canvas: Canvas?) {
         if (progressBar == null || canvas == null) return
         if (!progressBar.isShown || progressBar.width <= 80 || progressBar.height <= 0) return
         if (!isLikelyVideoProgress(progressBar)) return
-        if (!SponsorBlockState.isPositionFresh()) return
         val video = SponsorBlockState.currentVideo ?: return
         val durationMs = video.durationMs.takeIf { it > 0 } ?: progressBar.max.toLong().takeIf { it > 0 } ?: return
         if (!matchesCurrentPlayback(progressBar, durationMs)) return
@@ -61,10 +60,8 @@ class SponsorBlockProgressHook(classLoader: ClassLoader) : BaseHook(classLoader)
         if (segments.isEmpty()) return
 
         if (loggedClasses.add(progressBar.javaClass)) {
-            Log.x(
-                "SponsorBlockProgress: draw target=${progressBar.javaClass.name}, " +
-                    "w=${progressBar.width}, h=${progressBar.height}, max=${progressBar.max}, duration=$durationMs, segments=${segments.size}",
-            )
+            Log.trace { "SponsorBlockProgress: draw target=${progressBar.javaClass.name}, " +
+                    "w=${progressBar.width}, h=${progressBar.height}, max=${progressBar.max}, duration=$durationMs, segments=${segments.size}" }
         }
 
         val barHeight = (progressBar.height.coerceAtMost(progressBar.dp(5))).coerceAtLeast(progressBar.dp(2)).toFloat()

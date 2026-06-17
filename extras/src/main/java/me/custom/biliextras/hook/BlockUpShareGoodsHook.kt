@@ -6,7 +6,7 @@ import me.custom.biliextras.utils.*
 class BlockUpShareGoodsHook(classLoader: ClassLoader) : BaseHook(classLoader) {
     override fun startHook() {
         if (!ePrefs.getBoolean("block_up_share_goods", false)) return
-        Log.d("startHook: BlockUpShareGoods")
+        Log.s("startHook: BlockUpShareGoods")
 
         instance.viewUniteMossClass?.hookMethod("executeView", instance.viewUniteReqClass) { chain ->
             chain.proceed()?.also { handleViewReply(it, true) }

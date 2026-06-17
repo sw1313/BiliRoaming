@@ -29,7 +29,7 @@ class BlockStoryAdHook(classLoader: ClassLoader) : BaseHook(classLoader) {
         if (!ePrefs.getBoolean("block_story_ad", false)) return
 
         val addVideo = instance.addVideoMethod()?.name ?: run {
-            Log.w("BlockStoryAd: addVideo method not found")
+            Log.w { "BlockStoryAd: addVideo method not found" }
             return
         }
         val playerClass = instance.storyPagerPlayerClass ?: return
@@ -40,7 +40,7 @@ class BlockStoryAdHook(classLoader: ClassLoader) : BaseHook(classLoader) {
             val before = list.size
             list.removeAll { item -> item != null && isStoryAd(item) }
             val removed = before - list.size
-            if (removed > 0) Log.d("BlockStoryAd: removed $removed ad item(s)")
+            if (removed > 0) Log.trace { "BlockStoryAd: removed $removed ad item(s)" }
             chain.proceed()
         }
     }

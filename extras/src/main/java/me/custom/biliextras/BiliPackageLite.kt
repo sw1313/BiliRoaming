@@ -65,7 +65,7 @@ class BiliPackageLite(
                     dexHelper.decodeMethodIndex(it) as? Method
                 }
             }.onSuccess {
-                Log.d("StoryPagerPlayer addVideo dex result: ${it?.name}")
+                Log.d { "StoryPagerPlayer addVideo dex result: ${it?.name}" }
             }.onFailure {
                 Log.e(it)
             }.getOrNull()
@@ -100,7 +100,7 @@ class BiliPackageLite(
                 dexHelper.decodeMethodIndex(it)
             }?.declaringClass
         }.onSuccess {
-            Log.d("Pegasus convert class dex result: ${it?.name}")
+            Log.d { "Pegasus convert class dex result: ${it?.name}" }
         }.onFailure {
             Log.e(it)
         }.getOrNull()
@@ -169,13 +169,11 @@ class BiliPackageLite(
                     homeUserCenterClass to listOf(addSettingMethod)
                 }.toList()
         }.onSuccess {
-            Log.d(
-                "Home center dex result: ${
+            Log.d { "Home center dex result: ${
                     it.joinToString { (clazz, methods) ->
                         "${clazz?.name}#${methods.joinToString { method -> method.name }}"
                     }
-                }"
-            )
+                }" }
         }.onFailure {
             Log.e(it)
         }.getOrDefault(emptyList())
@@ -204,7 +202,7 @@ class BiliPackageLite(
                 }?.declaringClass
             }
         }.onSuccess {
-            Log.d("Setting router dex result: ${it?.name}")
+            Log.d { "Setting router dex result: ${it?.name}" }
         }.onFailure {
             Log.e(it)
         }.getOrNull()
@@ -281,11 +279,9 @@ class BiliPackageLite(
             currentPositionMethod?.isAccessible = true
             PlayerCoreMethods(playerCoreServiceClass, seekToMethod, currentPositionMethod)
         }.onSuccess {
-            Log.d(
-                "Player core dex result: ${
+            Log.d { "Player core dex result: ${
                     it?.serviceClass?.name
-                }#seek=${it?.seekTo?.name}, pos=${it?.currentPosition?.name}"
-            )
+                }#seek=${it?.seekTo?.name}, pos=${it?.currentPosition?.name}" }
         }.onFailure {
             Log.e(it)
         }.getOrNull()

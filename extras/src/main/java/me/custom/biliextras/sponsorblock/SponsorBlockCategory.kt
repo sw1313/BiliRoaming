@@ -15,7 +15,7 @@ object SponsorBlockCategory {
         Once("once", "跳过一次"),
         Manual("manual", "手动跳过"),
         ShowOnly("show", "仅显示"),
-        Disabled("disabled", "禁用"),
+        Disabled("disabled", "禁用")
     }
 
     val all = listOf(

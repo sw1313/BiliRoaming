@@ -121,9 +121,11 @@ object SponsorBlockState {
     }
 
     fun updatePlaybackPosition(positionMs: Long) {
-        if (positionMs == playbackPositionMs) return
+        if (positionMs < 0L) return
         val now = System.currentTimeMillis()
-        if (now - lastPositionUpdateTimeMs < 250L) return
+        // Keep lastPositionUpdateTimeMs fresh while paused (position unchanged) so progress
+        // bar segment markers are not hidden after isPositionFresh()'s 2s window.
+        if (positionMs == playbackPositionMs && now - lastPositionUpdateTimeMs < 250L) return
         playbackPositionMs = positionMs
         lastPositionUpdateTimeMs = now
     }

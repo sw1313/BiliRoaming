@@ -12,7 +12,7 @@ class ExtrasSettingHook(classLoader: ClassLoader) : BaseHook(classLoader) {
     private var startSetting = false
 
     override fun startHook() {
-        Log.d("startHook: ExtrasSetting")
+        Log.s("startHook: ExtrasSetting")
 
         instance.splashActivityClass?.hookMethod("onCreate", Bundle::class.java) { chain ->
             val self = chain.thisObject as Activity

@@ -70,9 +70,9 @@ class SponsorBlockMenuUiFactory private constructor(private val classLoader: Cla
                 fullscreenInline = fullscreenInline,
             )
         }.onFailure {
-            Log.w("SponsorBlock menu entry (description) failed: ${it.cause?.message ?: it.message}")
+            Log.w { "SponsorBlock menu entry (description) failed: ${it.cause?.message ?: it.message}" }
         }
-        Log.w("SponsorBlock menu entry: fallback to switch row")
+        Log.w { "SponsorBlock menu entry: fallback to switch row" }
         return runCatching {
             createSwitchRow(
                 "空降助手",
@@ -81,7 +81,7 @@ class SponsorBlockMenuUiFactory private constructor(private val classLoader: Cla
                 fullscreenInline = fullscreenInline,
             )
         }.onFailure {
-            Log.w("SponsorBlock menu entry (switch) failed: ${it.cause?.message ?: it.message}")
+            Log.w { "SponsorBlock menu entry (switch) failed: ${it.cause?.message ?: it.message}" }
         }.getOrNull()
     }
 
