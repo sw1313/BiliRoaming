@@ -22,6 +22,7 @@ object SponsorBlockState {
     )
 
     private val version = AtomicLong(0L)
+    private val changeListeners = CopyOnWriteArrayList<() -> Unit>()
     private val segments = CopyOnWriteArrayList<SegmentView>()
     /** Local vote state keyed by segment UUID (1=up, 0=down). Cleared on video reset. */
     private val userVotesByUuid = ConcurrentHashMap<String, Int>()
@@ -84,6 +85,20 @@ object SponsorBlockState {
         }
     }
 
+    fun addChangeListener(listener: () -> Unit) {
+        changeListeners.add(listener)
+    }
+
+    fun removeChangeListener(listener: () -> Unit) {
+        changeListeners.remove(listener)
+    }
+
+    private fun notifyChanged() {
+        changeListeners.forEach { listener ->
+            runCatching { listener() }
+        }
+    }
+
     fun reset(video: Video?) {
         currentVideo = video
         segments.clear()
@@ -93,6 +108,7 @@ object SponsorBlockState {
         lastPositionUpdateTimeMs = 0L
         cachedSegmentViews = null
         version.incrementAndGet()
+        notifyChanged()
     }
 
     fun update(video: Video, sponsorSegments: List<SponsorSegment>) {
@@ -118,6 +134,7 @@ object SponsorBlockState {
         showProgress = SponsorBlockPrefs.showProgress
         cachedSegmentViews = null
         version.incrementAndGet()
+        notifyChanged()
     }
 
     fun updatePlaybackPosition(positionMs: Long) {

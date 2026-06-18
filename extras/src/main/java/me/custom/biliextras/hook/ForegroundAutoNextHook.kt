@@ -107,7 +107,6 @@ class ForegroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoader) {
                     return@hookMethod null
                 }
                 openNextWithPreferencePick(mClassLoader, service, ctx, openGeneration)
-                clearPendingCompletion()
                 return@hookMethod null
             }
             val avid = pickNextAiAvid(service)
@@ -612,7 +611,6 @@ class ForegroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoader) {
                 val refMeta = resolveRefMeta(classLoader, service, currentAvid)
                 val cachedPlayback = takePlaybackPrefetch(currentAvid, refMeta)
                 if (cachedPlayback != null) {
-                    val ctx = UgcBackgroundPlayReflection.context(service) as? Context ?: return
                     applyPreferencePick(classLoader, service, ctx, generation, cachedPlayback)
                     return
                 }
@@ -630,6 +628,17 @@ class ForegroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoader) {
                 resumePendingCompletion(classLoader)
                 return
             }
+            openNextRelateFeed(classLoader, service, ctx, generation, avid)
+        }
+
+        /** Official relate-feed URI fallback — also used when preference filters match nothing. */
+        private fun openNextRelateFeed(
+            classLoader: ClassLoader,
+            service: Any,
+            ctx: Context,
+            generation: Int,
+            avid: Long,
+        ) {
             val fullscreen = isInFullscreen(service)
             netExecutor.execute {
                 val uri = runCatching { requestRelateUri(classLoader, avid) }
@@ -705,8 +714,8 @@ class ForegroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoader) {
                         return@post
                     }
                     if (picked == null) {
-                        Log.trace { "ForegroundAutoNext: preference pick found nothing for avid=$currentAvid" }
-                        resumePendingCompletion(classLoader)
+                        Log.trace { "ForegroundAutoNext: no candidate for avid=$currentAvid, trying relate feed" }
+                        openNextRelateFeed(classLoader, service, ctx, generation, currentAvid)
                         return@post
                     }
                     applyPreferencePick(classLoader, service, ctx, generation, picked, fullscreen)
@@ -739,15 +748,12 @@ class ForegroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoader) {
                 val refMeta = buildReferenceMeta(classLoader, repo, service, sourceAvid)
                 synchronized(playbackPrefetchLock) {
                     playbackPrefetchLoadingAvid = -1L
-                    if (picked != null && isPickValidForPrefs(picked, refMeta)) {
+                    if (picked != null) {
                         playbackPrefetchSourceAvid = sourceAvid
                         playbackPrefetchPick = picked
                         playbackPrefetchRefUpMid = refMeta.upMid
                         Log.trace { "ForegroundAutoNext: playback prefetch ($reason) " +
                                 "source=$sourceAvid refUp=${refMeta.upMid} -> ${picked.avid} upMid=${picked.upMid}" }
-                    } else if (picked != null) {
-                        Log.trace { "ForegroundAutoNext: playback prefetch ($reason) rejected " +
-                                "avid=${picked.avid} upMid=${picked.upMid} refUp=${refMeta.upMid}" }
                     }
                 }
             }
@@ -770,28 +776,12 @@ class ForegroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoader) {
                     playbackPrefetchRefUpMid = null
                     return null
                 }
-                if (!isPickValidForPrefs(pick, refMeta)) {
-                    Log.trace { "ForegroundAutoNext: playback prefetch failed validation " +
-                            "avid=${pick.avid} upMid=${pick.upMid} refUp=${refMeta.upMid}" }
-                    playbackPrefetchPick = null
-                    playbackPrefetchSourceAvid = -1L
-                    playbackPrefetchRefUpMid = null
-                    return null
-                }
                 playbackPrefetchPick = null
                 playbackPrefetchSourceAvid = -1L
                 playbackPrefetchRefUpMid = null
                 return pick
             }
         }
-
-        private fun isPickValidForPrefs(
-            pick: RelateCandidate,
-            refMeta: ForegroundAutoNextVideoMeta.Meta,
-        ): Boolean =
-            matchesPreference(pick, refMeta, tagStrict = true) ||
-                (ForegroundAutoNextPrefs.tagPref() != ForegroundAutoNextPrefs.TagPref.NONE &&
-                    matchesPreference(pick, refMeta, tagStrict = false))
 
         private fun clearPlaybackPrefetch() {
             synchronized(playbackPrefetchLock) {
@@ -911,12 +901,29 @@ class ForegroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoader) {
             val refMeta = buildReferenceMeta(classLoader, repo, service, currentAvid)
             Log.trace { "ForegroundAutoNext: pick source=$source ai=${aiAvids.size} feed=${feed.size} " +
                     "refUp=${refMeta.upMid} refTags=${refMeta.tagNames.size}" }
-            return when {
+            val strict = when {
                 !ForegroundAutoNextPrefs.needsNetworkMeta() ->
                     pickByOrientationOnly(aiAvids, feed, refMeta.portrait)
                 else ->
                     pickByPreferences(aiAvids, feed, refMeta)
             }
+            if (strict != null) return strict
+            return pickLooseFallback(aiAvids, feed)?.also {
+                Log.trace { "ForegroundAutoNext: preference miss, loose fallback avid=${it.avid}" }
+            }
+        }
+
+        /** First playable AI/relate candidate — ignores up/tag/orientation prefs. */
+        private fun pickLooseFallback(
+            aiAvidsInOrder: List<Long>,
+            feed: List<RelateCandidate>,
+        ): RelateCandidate? {
+            val fallbackAvid = aiAvidsInOrder.firstOrNull { !BlockChargingVideoHook.shouldBlockAvid(it) }
+            if (fallbackAvid != null) {
+                return feed.firstOrNull { it.avid == fallbackAvid }
+                    ?: RelateCandidate(fallbackAvid, null, null, null, emptySet())
+            }
+            return feed.firstOrNull { !BlockChargingVideoHook.shouldBlockAvid(it.avid) }
         }
 
         private fun requestContinuousPlayCandidates(

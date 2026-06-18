@@ -459,8 +459,19 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
                     return
                 }
             }
+            if (d1 >= 0 && trackedIndex > d1) {
+                val pagerId = storyIdentityAt(d1)
+                val sessionId = playingStoryKey ?: activeStoryKey
+                if (sessionId != null && pagerId != null && !identitiesMatch(sessionId, pagerId)) {
+                    Log.trace { "StoryAutoNext: w2 keep session tracked=$trackedIndex live=$liveEngineIndex " +
+                            "(d1=$d1 stale pager after recreate)" }
+                    captureActiveStoryPlayer(this)
+                    return
+                }
+            }
         }
-        syncPlayerTrackingFromPager("w2-visible", full = true)
+        // Official w2 only resumes adapter — never realigns indices; refresh metadata only.
+        syncPlayerTrackingFromPager("w2-visible", full = false)
         captureActiveStoryPlayer(this)
     }
 
@@ -468,7 +479,7 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
     private fun visibleSessionHost(): String =
         if (visibleOuterTabIndex == 1) HOST_SPACE else HOST_MAIN
 
-    /** Drop stale companion state when StoryVideoActivity is created/destroyed (home re-entry). */
+    /** Drop stale companion state only when StoryVideoActivity is finishing — not lock-screen recreate. */
     private fun resetStorySessionOnActivityBoundary(reason: String) {
         isInBackground = false
         activityPaused = false
@@ -513,12 +524,13 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
         val activityClass = runCatching {
             Class.forName("com.bilibili.video.story.StoryVideoActivity", false, mClassLoader)
         }.getOrNull() ?: return
-        activityClass.hookMethod("onCreate", android.os.Bundle::class.java) { chain ->
-            resetStorySessionOnActivityBoundary("onCreate")
-            chain.proceed()
-        }
         activityClass.hookMethod("onDestroy") { chain ->
-            resetStorySessionOnActivityBoundary("onDestroy")
+            val finishing = runCatching {
+                chain.thisObject.javaClass.getMethod("isFinishing").invoke(chain.thisObject) as? Boolean
+            }.getOrNull() == true
+            if (finishing) {
+                resetStorySessionOnActivityBoundary("onDestroy finishing")
+            }
             chain.proceed()
         }
         activityClass.hookMethod("onPause") { chain ->
@@ -660,7 +672,15 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
             val engineId = captureEnginePlayingIdentity() ?: playingStoryKey
             val d1Authoritative = engineId != null && pagerId != null &&
                 identitiesMatch(engineId, pagerId)
-            if (d1Authoritative || engineIdx <= d1) {
+            if (!d1Authoritative && trackedIndex > d1 &&
+                (engineIdx < 0 || engineIdx <= d1)
+            ) {
+                // Activity recreate: pager restarts at D1=0 while bg audio/session index is preserved.
+                engineId?.let {
+                    playingStoryKey = it
+                    activeStoryKey = it
+                }
+            } else if (d1Authoritative || engineIdx <= d1) {
                 trackedIndex = d1
                 liveEngineIndex = d1
             } else {
@@ -1184,6 +1204,14 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
                     "(w2 will sync)" }
             return
         }
+        if (d1 >= 0 && trackedIndex > d1 && !backgroundEngineMoved) {
+            val sessionId = playingStoryKey ?: activeStoryKey
+            val pagerId = storyIdentityAt(d1)
+            if (sessionId != null && pagerId != null && !identitiesMatch(sessionId, pagerId)) {
+                Log.trace { "StoryAutoNext: $logTag skip rebind — d1=$d1 stale vs tracked=$trackedIndex" }
+                return
+            }
+        }
         seedNativeStartFromEngineIfNeeded()
         clearOfficialAdapterPlayingMarkerIfNeeded()
         invokeOfficialRecyclerAlignToD1()
@@ -1561,7 +1589,6 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
                     return@hookMethod null
                 }
                 chain.proceed()
-                player.reconcileForegroundPageFromPager("x2")
             }
             Log.s("StoryAutoNext: hooked ${playerClass.name}.x2 bg-resume guard")
         }

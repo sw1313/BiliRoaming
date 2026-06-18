@@ -21,7 +21,6 @@ import me.custom.biliextras.utils.mossResponseHandlerReplaceProxy
 import java.lang.reflect.Proxy
 import java.lang.reflect.Method
 import java.util.concurrent.ConcurrentHashMap
-import kotlin.concurrent.thread
 
 class SponsorBlockHook(classLoader: ClassLoader) : BaseHook(classLoader) {
     private companion object {
@@ -41,6 +40,8 @@ class SponsorBlockHook(classLoader: ClassLoader) : BaseHook(classLoader) {
         const val TAIL_SEGMENT_MARGIN_MS = 2000L
         const val START_SEGMENT_MARGIN_MS = 1500L
         const val SHORT_SEGMENT_EXTRA_PAD_MS = 700L
+        /** Playback jumped back at least this far — user rewound, allow skip again. */
+        const val SEEK_BACK_RESET_TOLERANCE_MS = 1500L
     }
 
     private data class VideoKey(
@@ -70,6 +71,7 @@ class SponsorBlockHook(classLoader: ClassLoader) : BaseHook(classLoader) {
     private val fastPositionMethodByClass = ConcurrentHashMap<Class<*>, Method?>()
     private val fastDurationMethodByClass = ConcurrentHashMap<Class<*>, Method?>()
     private var pollIntervalMs = POLL_INTERVAL_MS
+    private var lastPlaybackPositionMs = -1L
     private val pollRunnable = object : Runnable {
         override fun run() {
             checkAndSkip()
@@ -83,7 +85,7 @@ class SponsorBlockHook(classLoader: ClassLoader) : BaseHook(classLoader) {
         hookViewReplies()
         hookPlayViewUnite()
         hookStoryVideoChange()
-        schedulePlayerCorePrewarm(PLAYER_CORE_STARTUP_PREWARM_DELAY_MS)
+        ensurePlayerCoreHooked()
         if (SponsorBlockPrefs.enabled) {
             ensurePolling()
         }
@@ -115,7 +117,7 @@ class SponsorBlockHook(classLoader: ClassLoader) : BaseHook(classLoader) {
         }
 
         override fun readPlaybackPositionMs(): Long? {
-            val service = playerCoreService ?: return SponsorBlockState.playbackPositionMs.takeIf { it >= 0 }
+            val service = resolvePlayerCoreService() ?: return SponsorBlockState.playbackPositionMs.takeIf { it >= 0 }
             val methods = instance.playerCoreMethods ?: return null
             return readPositionMs(service, methods)
         }
@@ -152,6 +154,10 @@ class SponsorBlockHook(classLoader: ClassLoader) : BaseHook(classLoader) {
             req?.let(::updateFromPlayViewReq)
             val result = chain.proceed()
             updateFromPlayViewReply(req, result)
+            handler.post {
+                adoptStoryPlayerCore()
+                checkAndSkip()
+            }
             result
         }
         if (unaryHandles.isNotEmpty()) {
@@ -168,7 +174,11 @@ class SponsorBlockHook(classLoader: ClassLoader) : BaseHook(classLoader) {
                     args[handlerIndex] = args[handlerIndex]!!.mossResponseHandlerReplaceProxy { reply ->
                         reply ?: return@mossResponseHandlerReplaceProxy null
                         updateFromPlayViewReply(req, reply)
-                        schedulePlayerCorePrewarm()
+                        ensurePlayerCoreHooked()
+                        handler.post {
+                            adoptStoryPlayerCore()
+                            checkAndSkip()
+                        }
                         null
                     }
                 }
@@ -192,7 +202,7 @@ class SponsorBlockHook(classLoader: ClassLoader) : BaseHook(classLoader) {
             // it is unavailable.
             val player = chain.thisObject
             val list = chain.args[0] as? List<*>
-            updateFromStoryItem(player.callMethodOrNull("F1") ?: list?.firstOrNull())
+            updateFromStoryItem(player.callMethodOrNull("F1") ?: list?.firstOrNull(), player)
             chain.proceed()
         }
         // Swiping between already-loaded videos (especially in UP space, where the list is
@@ -207,9 +217,10 @@ class SponsorBlockHook(classLoader: ClassLoader) : BaseHook(classLoader) {
         }
         if (x2Method != null) {
             x2Method.hookMethod { chain ->
+                val player = chain.thisObject
                 val result = chain.proceed()
                 // Official onPageSelected → x2; proceed-first keeps Story bg-resume x2 guard compatible.
-                updateFromStoryItem(chain.thisObject.callMethodOrNull("F1"))
+                updateFromStoryItem(player.callMethodOrNull("F1"), player)
                 result
             }
             Log.s("SponsorBlock: hooked StoryPagerPlayer.x2 for page-change detection")
@@ -218,7 +229,7 @@ class SponsorBlockHook(classLoader: ClassLoader) : BaseHook(classLoader) {
     }
 
     /** Resolve a story item's bvid/cid and (re)bind SponsorBlock to it. */
-    private fun updateFromStoryItem(item: Any?) {
+    private fun updateFromStoryItem(item: Any?, storyPagerPlayer: Any? = null) {
         item ?: return
         val bvid = firstValidBvid(
             item.callMethodOrNullAs<String?>("getBvid"),
@@ -231,6 +242,83 @@ class SponsorBlockHook(classLoader: ClassLoader) : BaseHook(classLoader) {
         } else {
             clearStaleProgressState(bvid, cid)
         }
+        adoptStoryPlayerCore(storyPagerPlayer)
+    }
+
+    /**
+     * Story mode binds vd3.p0 through StoryPlayer before our constructor hook runs, so
+     * playerCoreService stays null and skip never fires (log: segments ready but player
+     * service is not captured yet). Walk StoryPagerPlayer → StoryPlayer → IPlayerCoreService.
+     */
+    private fun Any.storyPlayerCoreFrom(): Any? = runCatching {
+        val serviceClass = instance.playerCoreMethods?.serviceClass ?: return@runCatching null
+        val storyPlayer = javaClass.declaredFields.firstOrNull {
+            it.type.name == "com.bilibili.video.story.player.StoryPlayer"
+        }?.apply { isAccessible = true }?.get(this) ?: return@runCatching null
+        storyPlayer.javaClass.declaredFields.asSequence()
+            .mapNotNull { field ->
+                runCatching {
+                    field.isAccessible = true
+                    field.get(storyPlayer)
+                }.getOrNull()
+            }
+            .firstOrNull { serviceClass.isInstance(it) }
+    }.getOrNull()
+
+    private fun adoptStoryPlayerCore(preferredStoryPager: Any? = null): Boolean {
+        val serviceClass = instance.playerCoreMethods?.serviceClass ?: return false
+        val candidates = buildList {
+            preferredStoryPager?.let { add(it) }
+            StoryBackgroundAutoNextHook.activeStoryPlayer?.let { add(it) }
+            StoryBackgroundAutoNextHook.mainFeedStoryPlayer?.let { add(it) }
+            StoryBackgroundAutoNextHook.upSpaceStoryPlayer?.let { add(it) }
+        }.distinctBy { System.identityHashCode(it) }
+        for (pager in candidates) {
+            val core = pager.storyPlayerCoreFrom() ?: continue
+            if (playerCoreService !== core) {
+                updatePlayerService(core, checkNow = true)
+                Log.trace { "SponsorBlock: adopted story player core ${core.javaClass.name}#" +
+                        System.identityHashCode(core) }
+            } else if (progressObserver == null) {
+                registerOfficialProgressObserver(core)
+                checkAndSkip()
+            }
+            return true
+        }
+        StoryBackgroundAutoNextHook.activePlayerCore
+            ?.takeIf { serviceClass.isInstance(it) }
+            ?.let { core ->
+                if (playerCoreService !== core) {
+                    updatePlayerService(core, checkNow = true)
+                    Log.trace { "SponsorBlock: adopted scanned story player core ${core.javaClass.name}#" +
+                            System.identityHashCode(core) }
+                }
+                return true
+            }
+        return false
+    }
+
+    private fun resolvePlayerCoreService(): Any? {
+        playerCoreService?.let { return it }
+        adoptStoryPlayerCore()
+        return playerCoreService
+    }
+
+    private fun ensurePlayerCoreHooked() {
+        if (playerCoreHooked) return
+        synchronized(this) {
+            if (playerCoreHooked) return
+            playerCoreHooked = true
+            runCatching { hookPlayerCore() }.onFailure { Log.e(it) }
+        }
+    }
+
+    private fun schedulePlayerCorePrewarm(delayMs: Long = PLAYER_CORE_PLAYVIEW_PREWARM_DELAY_MS) {
+        if (playerCoreHooked) {
+            handler.post { adoptStoryPlayerCore() }
+            return
+        }
+        handler.postDelayed({ ensurePlayerCoreHooked() }, delayMs)
     }
 
     private fun hookPlayerCore() {
@@ -241,9 +329,10 @@ class SponsorBlockHook(classLoader: ClassLoader) : BaseHook(classLoader) {
         if (methods.currentPosition == null) {
             Log.trace { "SponsorBlock: current position method not found" }
         }
-        Log.trace { "SponsorBlock: player core=${methods.serviceClass.name}, " +
+        Log.s("SponsorBlock: player core=${methods.serviceClass.name}, " +
                 "seek=${methods.seekTo.name}/${methods.seekTo.parameterCount}, " +
-                "position=${methods.currentPosition?.name}" }
+                "position=${methods.currentPosition?.name}")
+        hookPlayerCoreLazyCapture(methods)
         methods.serviceClass.hookAllConstructors { chain ->
             chain.proceed()
             updatePlayerService(chain.thisObject, checkNow = true)
@@ -251,22 +340,81 @@ class SponsorBlockHook(classLoader: ClassLoader) : BaseHook(classLoader) {
         }
     }
 
-    private fun prewarmPlayerCoreHook() {
-        if (playerCoreHooked) return
-        thread(name = "BiliExtrasSponsorBlockPrewarm") {
-            synchronized(this) {
-                if (playerCoreHooked) return@synchronized
-                playerCoreHooked = true
-                runCatching { hookPlayerCore() }.onFailure {
-                    Log.e(it)
-                }
+    /**
+     * Bilibili reuses a single IPlayerCoreService for long sessions. Constructor hooks miss
+     * instances created before our hook installs (log: segments=1 but player service never
+     * captured — affects Story and normal UGC player alike).
+     */
+    private fun hookPlayerCoreLazyCapture(methods: me.custom.biliextras.BiliPackageLite.PlayerCoreMethods) {
+        val serviceClass = methods.serviceClass
+        val captureHook: (Any) -> Unit = { service ->
+            if (playerCoreService == null) {
+                Log.trace { "SponsorBlock: lazy-captured player core ${service.javaClass.name}#" +
+                        System.identityHashCode(service) }
+                updatePlayerService(service, checkNow = true)
+            }
+        }
+        serviceClass.declaredMethods.filter { method ->
+            method.parameterCount == 0 &&
+                (method.returnType == Int::class.javaPrimitiveType ||
+                    method.returnType == Long::class.javaPrimitiveType) &&
+                (method.name == "getCurrentPosition" ||
+                    method.name == "getRealCurrentPosition" ||
+                    method.name.contains("CurrentPosition", ignoreCase = true))
+        }.forEach { method ->
+            serviceClass.hookMethod(method.name) { chain ->
+                captureHook(chain.thisObject)
+                chain.proceed()
+            }
+        }
+        serviceClass.hookAllMethods("seekTo") { chain ->
+            captureHook(chain.thisObject)
+            val targetMs = (chain.args.firstOrNull() as? Number)?.toLong()
+            chain.proceed()
+            targetMs?.let { ms ->
+                handler.post { prepareSkipStateForPosition(ms, fromUserSeek = true) }
             }
         }
     }
 
-    private fun schedulePlayerCorePrewarm(delayMs: Long = PLAYER_CORE_PLAYVIEW_PREWARM_DELAY_MS) {
-        if (playerCoreHooked) return
-        handler.postDelayed({ prewarmPlayerCoreHook() }, delayMs)
+    /**
+     * After the first skip, [skippedSegmentUntilMs] blocked re-entry for 8s even when the user
+     * scrubbed back before the segment (log 23:22:10 hit once, no second hit after rewind).
+     */
+    private fun prepareSkipStateForPosition(positionMs: Long, fromUserSeek: Boolean = false) {
+        val previous = lastPlaybackPositionMs
+        lastPlaybackPositionMs = positionMs
+        val jumpedBack = previous >= 0 && positionMs + SEEK_BACK_RESET_TOLERANCE_MS < previous
+        if (!jumpedBack && !fromUserSeek) return
+        // Auto-skip seek often lands slightly inside the segment; small backward jitter must not
+        // clear cooldown or re-arm allowInsideSegmentOnce (log: reset every second → seek loop).
+        if (jumpedBack && !fromUserSeek) {
+            val rewoundBeforeSegment = currentSegments.any { segment ->
+                val startMs = (segment.start * 1000).toLong()
+                positionMs < startMs - CLEAR_PAST_TOLERANCE_MS
+            }
+            if (!rewoundBeforeSegment) return
+        }
+        var reset = false
+        currentSegments.forEach { segment ->
+            val startMs = (segment.start * 1000).toLong()
+            val endMs = (segment.end * 1000).toLong()
+            val key = segment.uuid.ifBlank { "${segment.category}:${segment.start}:${segment.end}" }
+            if (positionMs < endMs - CLEAR_PAST_TOLERANCE_MS) {
+                skippedSegmentUntilMs.remove(key)
+                reset = true
+            }
+            if (positionMs in startMs until endMs) {
+                allowInsideSegmentOnce = true
+                reset = true
+            }
+        }
+        if (reset || jumpedBack) {
+            lastCheckedSecond = null
+            lastSkipAtMs = 0L
+            Log.trace { "SponsorBlock: reset skip eligibility at ${positionMs}ms " +
+                    "(jumpedBack=$jumpedBack userSeek=$fromUserSeek)" }
+        }
     }
 
     private fun updatePlayerService(service: Any, checkNow: Boolean) {
@@ -292,7 +440,10 @@ class SponsorBlockHook(classLoader: ClassLoader) : BaseHook(classLoader) {
             it.name == "registerPlayerProgressObserver" &&
                 it.parameterTypes.size == 1 &&
                 it.parameterTypes[0].name == "tv.danmaku.biliplayerv2.service.PlayerProgressObserver"
-        } ?: return
+        } ?: run {
+            Log.trace { "SponsorBlock: registerPlayerProgressObserver missing on ${service.javaClass.name}" }
+            return
+        }
         val observerClass = registerMethod.parameterTypes[0]
         val observer = Proxy.newProxyInstance(mClassLoader, arrayOf(observerClass)) { _, method, args ->
             if (method.name == "onPlayerProgressChange" && args?.size == 2) {
@@ -333,7 +484,7 @@ class SponsorBlockHook(classLoader: ClassLoader) : BaseHook(classLoader) {
             ?: arc?.callMethodOrNullAs<Long?>("getAid")?.takeIf { it > 0 }?.let(::av2bv)
             ?: pendingBvid
         val aidBvid = bvid?.takeIf { it.startsWith("BV") }
-        val cid = firstCidFromViewReply(reply)
+        val cid = firstCidFromViewReply(reply, arc)
         if (aidBvid != null && cid > 0) {
             updateVideo(VideoKey(aidBvid, cid))
         } else {
@@ -351,10 +502,17 @@ class SponsorBlockHook(classLoader: ClassLoader) : BaseHook(classLoader) {
         if (!bvid.isNullOrBlank() && bvid.startsWith("BV")) {
             pendingBvid = bvid
             Log.trace { "SponsorBlock: pending bvid from view req $bvid" }
+            val cid = req.callMethodOrNullAs<Long?>("getCid")
+                ?: req.callMethodOrNull("getVod")?.callMethodOrNullAs<Long?>("getCid")
+                ?: 0L
+            if (cid > 0L) {
+                updateVideo(VideoKey(bvid, cid))
+            }
         }
     }
 
-    private fun firstCidFromViewReply(reply: Any): Long {
+    private fun firstCidFromViewReply(reply: Any, arc: Any? = reply.callMethodOrNull("getArc")): Long {
+        arc?.callMethodOrNullAs<Long?>("getCid")?.takeIf { it > 0L }?.let { return it }
         val pages = reply.callMethodOrNull("getPagesList") as? List<*>
             ?: reply.callMethodOrNull("getPages") as? List<*>
             ?: return 0L
@@ -431,7 +589,11 @@ class SponsorBlockHook(classLoader: ClassLoader) : BaseHook(classLoader) {
             ?: pendingBvid
         if (!bvid.isNullOrBlank() && bvid.startsWith("BV")) {
             updateVideo(VideoKey(bvid, cid, durationMs.coerceAtLeast(0L)))
-            schedulePlayerCorePrewarm()
+            ensurePlayerCoreHooked()
+            handler.post {
+                adoptStoryPlayerCore()
+                checkAndSkip()
+            }
         } else {
             Log.trace { "SponsorBlock: playView reply cid=$cid but bvid is null" }
         }
@@ -456,15 +618,37 @@ class SponsorBlockHook(classLoader: ClassLoader) : BaseHook(classLoader) {
             SponsorBlockState.reset(video.toStateVideo())
             return
         }
-        SponsorBlockState.reset(video.toStateVideo())
+        val cachedSegments = peekCachedSegments(video)
+        if (cachedSegments.isNotEmpty()) {
+            currentSegments = cachedSegments
+            allowInsideSegmentOnce = true
+            SponsorBlockState.update(video.toStateVideo(), currentSegments)
+            Log.trace { "SponsorBlock: cache hit ${video.bvid}/${video.cid}, segments=${currentSegments.size}" }
+        } else {
+            SponsorBlockState.reset(video.toStateVideo())
+        }
         fetchSegments(video)
     }
+
+    private fun peekCachedSegments(video: VideoKey): List<SponsorSegment> {
+        val categories = SponsorBlockPrefs.requestCategories
+        if (categories.isEmpty()) return emptyList()
+        val cached = SponsorBlockCache.peek(video.bvid, video.cid, categories) ?: return emptyList()
+        return filterEnabledSegments(cached)
+    }
+
+    private fun filterEnabledSegments(segments: List<SponsorSegment>): List<SponsorSegment> =
+        segments.filter { segment ->
+            SponsorBlockPrefs.modeOf(segment.category) != SponsorBlockCategory.SkipMode.Disabled &&
+                segment.duration >= SponsorBlockPrefs.blockLimit
+        }
 
     private fun resetSkipThrottle() {
         lastCheckedSecond = null
         lastSkipAtMs = 0L
         skippedSegmentUntilMs.clear()
         allowInsideSegmentOnce = false
+        lastPlaybackPositionMs = -1L
     }
 
     private fun fetchSegments(video: VideoKey) {
@@ -474,28 +658,33 @@ class SponsorBlockHook(classLoader: ClassLoader) : BaseHook(classLoader) {
         val categories = SponsorBlockPrefs.requestCategories
         if (categories.isEmpty()) {
             Log.trace { "SponsorBlock: no SponsorBlock category enabled" }
+            fetchingKey = null
             return
         }
-        SponsorBlockBackground.submit {
+        SponsorBlockBackground.submitFetch {
+            val fetchStartedAt = System.currentTimeMillis()
             val result = SponsorBlockCache.getOrFetch(video.bvid, video.cid, categories)
             handler.post {
                 fetchingKey = null
                 val activeVideo = currentVideo?.takeIf { it.sameVideo(video) } ?: return@post
                 val fetchedSegments = result.getOrNull()
                 if (fetchedSegments != null) {
-                    currentSegments = fetchedSegments.filter { segment ->
-                        SponsorBlockPrefs.modeOf(segment.category) != SponsorBlockCategory.SkipMode.Disabled &&
-                            segment.duration >= SponsorBlockPrefs.blockLimit
-                    }
+                    currentSegments = filterEnabledSegments(fetchedSegments)
                     allowInsideSegmentOnce = true
                     SponsorBlockState.update(activeVideo.toStateVideo(), currentSegments)
                 }
                 val error = result.exceptionOrNull()?.message
+                val elapsed = System.currentTimeMillis() - fetchStartedAt
                 if (currentSegments.isNotEmpty() || error != null) {
-                    Log.trace { "SponsorBlock: ${video.bvid}/${video.cid}, segments=${currentSegments.size}, error=$error" }
+                    Log.trace {
+                        "SponsorBlock: ${video.bvid}/${video.cid}, segments=${currentSegments.size}, " +
+                            "elapsed=${elapsed}ms, error=$error"
+                    }
                 }
                 if (currentSegments.isNotEmpty() && playerCoreService == null) {
-                    Log.trace { "SponsorBlock: segments ready but player service is not captured yet" }
+                    if (!adoptStoryPlayerCore()) {
+                        Log.trace { "SponsorBlock: segments ready but player service is not captured yet" }
+                    }
                 }
                 checkAndSkip()
                 if (result.isFailure && currentVideo?.sameVideo(video) == true) {
@@ -522,7 +711,7 @@ class SponsorBlockHook(classLoader: ClassLoader) : BaseHook(classLoader) {
     }
 
     private fun checkAndSkip() {
-        val service = playerCoreService ?: return
+        val service = resolvePlayerCoreService() ?: return
         if (instance.playerCoreMethods == null) return
         val positions = positionSnapshotFast(service)
         val positionMs = selectPositionMs(positions) ?: return
@@ -532,6 +721,7 @@ class SponsorBlockHook(classLoader: ClassLoader) : BaseHook(classLoader) {
 
     private fun checkAndSkip(positionMs: Long, durationMs: Long?) {
         if (!SponsorBlockPrefs.enabled) return
+        prepareSkipStateForPosition(positionMs)
         if (currentSegments.isNotEmpty()) {
             SponsorBlockState.updatePlaybackPosition(positionMs)
         }
@@ -549,13 +739,20 @@ class SponsorBlockHook(classLoader: ClassLoader) : BaseHook(classLoader) {
             val endMs = (it.end * 1000).toLong()
             if (positionMs >= endMs - CLEAR_PAST_TOLERANCE_MS) return@firstOrNull false
             val key = it.uuid.ifBlank { "${it.category}:${it.start}:${it.end}" }
-            if ((skippedSegmentUntilMs[key] ?: 0L) > now) return@firstOrNull false
+            val cooldownUntil = skippedSegmentUntilMs[key] ?: 0L
+            if (cooldownUntil > now) {
+                if (positionMs < startMs - CLEAR_PAST_TOLERANCE_MS) {
+                    skippedSegmentUntilMs.remove(key)
+                } else {
+                    return@firstOrNull false
+                }
+            }
             (positionMs <= startMs && startMs <= positionMs + SKIP_LOOKAHEAD_MS) ||
                 (allowInsideSegmentOnce && positionMs in startMs until endMs)
         } ?: return
         val key = segment.uuid.ifBlank { "${segment.category}:${segment.start}:${segment.end}" }
         allowInsideSegmentOnce = false
-        val service = playerCoreService ?: return
+        val service = resolvePlayerCoreService() ?: return
         val startMs = (segment.start * 1000).toLong()
         val endMs = (segment.end * 1000).toLong()
         val resolvedDuration = durationMs?.takeIf { it > 0L } ?: positionSnapshot(service).let { positions ->
@@ -575,7 +772,7 @@ class SponsorBlockHook(classLoader: ClassLoader) : BaseHook(classLoader) {
     }
 
     private fun seekToSegmentEnd(segment: SponsorBlockState.SegmentView, attempt: Int = 0) {
-        val service = playerCoreService
+        val service = resolvePlayerCoreService()
         if (service == null) {
             if (attempt < 5) {
                 schedulePlayerCorePrewarm(0)
@@ -600,7 +797,7 @@ class SponsorBlockHook(classLoader: ClassLoader) : BaseHook(classLoader) {
     }
 
     private fun seekToSegmentStart(segment: SponsorBlockState.SegmentView, attempt: Int = 0) {
-        val service = playerCoreService
+        val service = resolvePlayerCoreService()
         if (service == null) {
             if (attempt < 5) {
                 schedulePlayerCorePrewarm(0)

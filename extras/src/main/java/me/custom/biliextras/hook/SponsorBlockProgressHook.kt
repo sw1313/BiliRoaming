@@ -2,16 +2,14 @@ package me.custom.biliextras.hook
 
 import android.graphics.Canvas
 import android.graphics.Paint
+import android.os.Handler
+import android.os.Looper
 import android.view.ViewParent
+import android.widget.AbsSeekBar
 import android.widget.ProgressBar
 import android.widget.SeekBar
-import android.view.MotionEvent
-import me.custom.biliextras.sponsorblock.SponsorBlockCategory
-import me.custom.biliextras.sponsorblock.SponsorBlockController
 import me.custom.biliextras.sponsorblock.SponsorBlockPrefs
-import me.custom.biliextras.sponsorblock.SponsorBlockSegmentActionDialog
 import me.custom.biliextras.sponsorblock.SponsorBlockState
-import me.custom.biliextras.sponsorblock.SponsorBlockSubmitDialog
 import me.custom.biliextras.utils.Log
 import me.custom.biliextras.utils.hookMethod
 import java.util.Collections
@@ -19,7 +17,9 @@ import java.util.WeakHashMap
 
 class SponsorBlockProgressHook(classLoader: ClassLoader) : BaseHook(classLoader) {
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val mainHandler = Handler(Looper.getMainLooper())
     private val loggedClasses = Collections.newSetFromMap(WeakHashMap<Class<*>, Boolean>())
+    private val trackedSeekBars = Collections.newSetFromMap(WeakHashMap<ProgressBar, Boolean>())
     private var cachedDrawVersion = -1L
     private var cachedDrawSegments = emptyList<SponsorBlockState.SegmentView>()
 
@@ -32,57 +32,131 @@ class SponsorBlockProgressHook(classLoader: ClassLoader) : BaseHook(classLoader)
     )
 
     override fun startHook() {
-        ProgressBar::class.java.hookMethod("onDraw", Canvas::class.java) { chain ->
-            val result = chain.proceed()
-            if (SponsorBlockPrefs.enabled && SponsorBlockState.showProgress && SponsorBlockState.hasSegments) {
-                drawSegments(chain.thisObject as? ProgressBar, chain.args.firstOrNull() as? Canvas)
-            }
-            result
+        if (!hookBeforeDrawThumb()) {
+            hookBeforeDrawThumbFallback()
         }
-        SeekBar::class.java.hookMethod("onTouchEvent", android.view.MotionEvent::class.java) { chain ->
-            val result = chain.proceed()
-            if (SponsorBlockPrefs.enabled) {
-                handleSeekBarTouch(chain.thisObject as? SeekBar, chain.args.firstOrNull() as? android.view.MotionEvent)
-            }
-            result
-        }
-        Log.s("SponsorBlockProgress: hooked ProgressBar.onDraw + SeekBar.onTouchEvent")
+        hookSeekBarAttachTracking()
+        SponsorBlockState.addChangeListener(::requestSeekBarRefresh)
+        Log.s("SponsorBlockProgress: hooked seek bar segment overlay (menu-only actions)")
     }
 
-    private fun drawSegments(progressBar: ProgressBar?, canvas: Canvas?) {
-        if (progressBar == null || canvas == null) return
-        if (!progressBar.isShown || progressBar.width <= 80 || progressBar.height <= 0) return
-        if (!isLikelyVideoProgress(progressBar)) return
+    /**
+     * Official order (AbsSeekBar.onDraw): ProgressBar.onDraw (track layers) -> drawThumb (TV).
+     * Paint sponsor ranges immediately before drawThumb so they sit above the bar and below TV.
+     * Must NOT replace onDraw — that breaks thumb canvas state and can freeze the player.
+     */
+    private fun hookBeforeDrawThumb(): Boolean {
+        val drawThumb = AbsSeekBar::class.java.declaredMethods.firstOrNull { method ->
+            method.name == "drawThumb" &&
+                method.parameterCount == 1 &&
+                method.parameterTypes[0] == Canvas::class.java
+        } ?: return false
+        drawThumb.isAccessible = true
+        drawThumb.hookMethod { chain ->
+            val seekBar = chain.thisObject
+            val canvas = chain.args.firstOrNull() as? Canvas
+            if (seekBar is SeekBar && canvas != null && shouldDrawOnSeekBar(seekBar)) {
+                trackedSeekBars.add(seekBar)
+                drawSegmentsOnSeekBar(seekBar, canvas)
+            }
+            chain.proceed()
+        }
+        Log.trace { "SponsorBlockProgress: hooked AbsSeekBar.drawThumb" }
+        return true
+    }
+
+    /** Older ROMs without drawThumb(): insert after ProgressBar.onDraw, still before thumb in same pass. */
+    private fun hookBeforeDrawThumbFallback() {
+        ProgressBar::class.java.hookMethod("onDraw", Canvas::class.java) { chain ->
+            val progressBar = chain.thisObject as ProgressBar
+            val canvas = chain.args.firstOrNull() as? Canvas
+            val result = chain.proceed()
+            if (progressBar is SeekBar && canvas != null && shouldDrawOnSeekBar(progressBar)) {
+                trackedSeekBars.add(progressBar)
+                drawSegmentsOnSeekBar(progressBar, canvas)
+            }
+            result
+        }
+        Log.trace { "SponsorBlockProgress: using ProgressBar.onDraw fallback" }
+    }
+
+    private fun shouldDrawOnSeekBar(seekBar: SeekBar): Boolean =
+        SponsorBlockPrefs.enabled &&
+            SponsorBlockState.showProgress &&
+            SponsorBlockState.hasSegments &&
+            isLikelyVideoProgress(seekBar)
+
+    private fun hookSeekBarAttachTracking() {
+        SeekBar::class.java.hookMethod("onAttachedToWindow") { chain ->
+            val seekBar = chain.thisObject as SeekBar
+            if (videoSeekMarkers.any { seekBar.javaClass.name.contains(it) }) {
+                trackedSeekBars.add(seekBar)
+            }
+            chain.proceed()
+        }
+    }
+
+    private fun requestSeekBarRefresh() {
+        if (!SponsorBlockPrefs.enabled || !SponsorBlockState.showProgress) return
+        mainHandler.post {
+            trackedSeekBars.forEach { bar ->
+                if (!bar.isShown) return@forEach
+                bar.progressDrawable?.invalidateSelf()
+                bar.postInvalidateOnAnimation()
+            }
+        }
+    }
+
+    private fun drawSegmentsOnSeekBar(seekBar: SeekBar, canvas: Canvas) {
+        if (!seekBar.isShown || seekBar.width <= 80 || seekBar.height <= 0) return
         val video = SponsorBlockState.currentVideo ?: return
-        val durationMs = video.durationMs.takeIf { it > 0 } ?: progressBar.max.toLong().takeIf { it > 0 } ?: return
-        if (!matchesCurrentPlayback(progressBar, durationMs)) return
+        val durationMs = resolveDurationMs(seekBar, video.durationMs) ?: return
+        if (!matchesCurrentPlayback(seekBar, durationMs)) return
         val segments = segmentsForDraw()
         if (segments.isEmpty()) return
 
-        if (loggedClasses.add(progressBar.javaClass)) {
-            Log.trace { "SponsorBlockProgress: draw target=${progressBar.javaClass.name}, " +
-                    "w=${progressBar.width}, h=${progressBar.height}, max=${progressBar.max}, duration=$durationMs, segments=${segments.size}" }
+        if (loggedClasses.add(seekBar.javaClass)) {
+            Log.trace {
+                "SponsorBlockProgress: draw target=${seekBar.javaClass.name}, " +
+                    "w=${seekBar.width}, h=${seekBar.height}, max=${seekBar.max}, duration=$durationMs, segments=${segments.size}"
+            }
         }
 
-        val barHeight = (progressBar.height.coerceAtMost(progressBar.dp(5))).coerceAtLeast(progressBar.dp(2)).toFloat()
-        val top = ((progressBar.height - barHeight) / 2f).coerceAtLeast(0f)
+        val paddingLeft = seekBar.paddingLeft.toFloat()
+        val paddingRight = seekBar.paddingRight.toFloat()
+        val trackLeft = paddingLeft
+        val trackWidth = (seekBar.width - paddingLeft - paddingRight).coerceAtLeast(1f)
+        val barHeight = (seekBar.height.coerceAtMost(seekBar.dp(5))).coerceAtLeast(seekBar.dp(2)).toFloat()
+        val top = ((seekBar.height - barHeight) / 2f).coerceAtLeast(0f)
         val bottom = top + barHeight
-        val width = progressBar.width.toFloat()
         segments.forEach { segment ->
             if (segment.endMs <= segment.startMs) return@forEach
-            val left = (segment.startMs.toFloat() / durationMs * width).coerceIn(0f, width)
-            val right = (segment.endMs.toFloat() / durationMs * width).coerceIn(left, width)
+            val left = trackLeft + (segment.startMs.toFloat() / durationMs * trackWidth).coerceIn(0f, trackWidth)
+            val right = trackLeft + (segment.endMs.toFloat() / durationMs * trackWidth).coerceIn(left - trackLeft, trackWidth)
             if (right - left < 1f) return@forEach
             paint.color = segment.color
+            paint.style = Paint.Style.FILL
             canvas.drawRect(left, top, right, bottom, paint)
         }
+    }
+
+    /** Official seek bars use [ProgressBar.getMax] as the timeline; arc duration can be longer (e.g. Story). */
+    private fun resolveDurationMs(progressBar: ProgressBar, videoDurationMs: Long): Long? {
+        val max = progressBar.max.toLong()
+        if (isOfficialSeekBar(progressBar) && max > 1000L) return max
+        if (max > 1000L && videoDurationMs > 0L &&
+            kotlin.math.abs(max - videoDurationMs) > 1500L
+        ) {
+            return max
+        }
+        if (videoDurationMs > 0L) return videoDurationMs
+        return max.takeIf { it > 0L }
     }
 
     private fun isLikelyVideoProgress(progressBar: ProgressBar): Boolean {
         if (progressBar.max <= 0) return false
         val cls = progressBar.javaClass.name
         if (progressBar is SeekBar) {
-            // Whitelist first: Story 竖屏/横屏都用 StorySeekBar，不受细条启发式影响。
             if (videoSeekMarkers.any { cls.contains(it) }) return true
             if (isVolumeOrBrightnessBar(progressBar)) return false
             return false
@@ -94,6 +168,11 @@ class SponsorBlockProgressHook(classLoader: ClassLoader) : BaseHook(classLoader)
         val name = cls.lowercase()
         if (name.contains("loading") || name.contains("refresh")) return false
         return progressBar.progress >= 0
+    }
+
+    private fun isOfficialSeekBar(progressBar: ProgressBar): Boolean {
+        val cls = progressBar.javaClass.name
+        return cls.contains("playerbizcommonv2.widget.seek.v3") || cls.contains("StorySeekBar")
     }
 
     private fun isVolumeOrBrightnessBar(progressBar: ProgressBar): Boolean {
@@ -110,7 +189,6 @@ class SponsorBlockProgressHook(classLoader: ClassLoader) : BaseHook(classLoader)
             parent = parent.parent
             depth++
         }
-        // Volume overlay uses a very thin seek bar (~2dp); player timeline is much taller.
         if (progressBar.height in 1..progressBar.dp(6)) return true
         return false
     }
@@ -119,6 +197,7 @@ class SponsorBlockProgressHook(classLoader: ClassLoader) : BaseHook(classLoader)
         val max = progressBar.max.toLong()
         if (max <= 0L || durationMs <= 0L) return false
         if (kotlin.math.abs(max - durationMs) <= 1500L) return true
+        if (isOfficialSeekBar(progressBar) && max > 1000L) return true
         if (max == 100L) {
             val playbackMs = SponsorBlockState.playbackPositionMs.takeIf { it >= 0L } ?: return false
             val progressMs = progressBar.progress.toLong() * durationMs / 100L
@@ -129,30 +208,6 @@ class SponsorBlockProgressHook(classLoader: ClassLoader) : BaseHook(classLoader)
 
     private fun ProgressBar.dp(value: Int): Int =
         (value * resources.displayMetrics.density + 0.5f).toInt()
-
-    private fun handleSeekBarTouch(seekBar: SeekBar?, event: MotionEvent?) {
-        if (seekBar == null || event == null) return
-        if (event.action != MotionEvent.ACTION_UP) return
-        if (!isLikelyVideoProgress(seekBar)) return
-        if (!SponsorBlockState.hasSegments) return
-        val video = SponsorBlockState.currentVideo ?: return
-        val durationMs = video.durationMs.takeIf { it > 0 } ?: seekBar.max.toLong().takeIf { it > 0 } ?: return
-        if (!matchesCurrentPlayback(seekBar, durationMs)) return
-        val touchX = event.x.coerceIn(0f, seekBar.width.toFloat())
-        val timeMs = (touchX / seekBar.width * durationMs).toLong()
-        val segment = SponsorBlockController.findSegmentAtTimeMs(timeMs) ?: return
-        when (segment.mode) {
-            SponsorBlockCategory.SkipMode.Manual -> SponsorBlockController.manualSkipSegment(segment)
-            SponsorBlockCategory.SkipMode.Disabled -> return
-            else -> SponsorBlockSegmentActionDialog.show(seekBar.context, segment)
-        }
-    }
-
-    fun handleSeekBarLongPress(seekBar: SeekBar) {
-        if (!SponsorBlockPrefs.enabled) return
-        if (!isLikelyVideoProgress(seekBar)) return
-        SponsorBlockSubmitDialog.show(seekBar.context)
-    }
 
     private fun segmentsForDraw(): List<SponsorBlockState.SegmentView> {
         val version = SponsorBlockState.contentVersion()
