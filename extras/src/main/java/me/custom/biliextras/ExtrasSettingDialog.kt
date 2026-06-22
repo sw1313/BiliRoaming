@@ -32,7 +32,7 @@ class ExtrasSettingDialog(context: Context) : AlertDialog.Builder(context) {
             listOf(
                 "block_up_share_goods",
                 "block_story_live",
-                "block_story_ad",
+                "block_story_ad_dynamic",
                 "hide_vip_center",
                 "block_charging_video",
                 "block_charging_video_log",

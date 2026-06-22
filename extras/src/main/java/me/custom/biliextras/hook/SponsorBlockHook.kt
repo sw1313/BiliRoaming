@@ -27,7 +27,6 @@ class SponsorBlockHook(classLoader: ClassLoader) : BaseHook(classLoader) {
         const val POLL_INTERVAL_MS = 1000L
         const val POLL_FALLBACK_INTERVAL_MS = 4000L
         const val SKIP_LOOKAHEAD_MS = 1000L
-        const val SKIP_TARGET_PADDING_MS = 200
         const val FETCH_RETRY_DELAY_MS = 3000L
         const val PLAYER_CORE_STARTUP_PREWARM_DELAY_MS = 3000L
         const val PLAYER_CORE_PLAYVIEW_PREWARM_DELAY_MS = 300L
@@ -123,6 +122,10 @@ class SponsorBlockHook(classLoader: ClassLoader) : BaseHook(classLoader) {
         }
 
         override fun currentSegments(): List<SponsorSegment> = currentSegments
+
+        override fun rebindStoryFromPager(storyPagerPlayer: Any?) {
+            rebindStorySegmentsFromPager(storyPagerPlayer, requireActiveQ = false)
+        }
     }
 
     private fun stopPolling() {
@@ -202,7 +205,10 @@ class SponsorBlockHook(classLoader: ClassLoader) : BaseHook(classLoader) {
             // it is unavailable.
             val player = chain.thisObject
             val list = chain.args[0] as? List<*>
-            updateFromStoryItem(player.callMethodOrNull("F1") ?: list?.firstOrNull(), player)
+            rebindStorySegmentsFromPager(player)
+            if (player.callMethodOrNull("F1") == null && shouldBindStorySegmentsFromPager(player)) {
+                updateFromStoryItem(list?.firstOrNull(), player)
+            }
             chain.proceed()
         }
         // Swiping between already-loaded videos (especially in UP space, where the list is
@@ -219,13 +225,48 @@ class SponsorBlockHook(classLoader: ClassLoader) : BaseHook(classLoader) {
             x2Method.hookMethod { chain ->
                 val player = chain.thisObject
                 val result = chain.proceed()
-                // Official onPageSelected → x2; proceed-first keeps Story bg-resume x2 guard compatible.
-                updateFromStoryItem(player.callMethodOrNull("F1"), player)
+                // jadx x2: no-op when !d2() (Q!=3); hidden tab's F1 must not bind segments.
+                rebindStorySegmentsFromPager(player)
                 result
             }
             Log.s("SponsorBlock: hooked StoryPagerPlayer.x2 for page-change detection")
         }
         Log.s("SponsorBlock: hooked StoryPagerPlayer.$addVideoName for video change detection")
+    }
+
+    /**
+     * Official StoryPagerPlayer.F1 = adapter.Z0(D1). Only the visible pager with Q==3 (d2) is
+     * authoritative — prefetch playView and inactive-tab x2 must not drive segment binding.
+     */
+    private fun rebindStorySegmentsFromPager(storyPagerPlayer: Any?, requireActiveQ: Boolean = true) {
+        val player = storyPagerPlayer ?: return
+        if (!shouldBindStorySegmentsFromPager(player, requireActiveQ)) return
+        updateFromStoryItem(player.callMethodOrNull("F1"), player)
+    }
+
+    /** jadx StoryPagerPlayer.d2(): Q == 3 — this pager owns playback. */
+    private fun Any.isOfficialStoryPagerActive(): Boolean =
+        readOfficialStoryPagerQ() == 3
+
+    private fun Any.readOfficialStoryPagerQ(): Int? = runCatching {
+        javaClass.declaredFields.firstOrNull {
+            it.name == "Q" && it.type == Int::class.javaPrimitiveType
+        }?.apply { isAccessible = true }?.getInt(this)
+    }.getOrNull()
+
+    private fun isVisibleOuterTabStoryPager(player: Any): Boolean {
+        val tabPlayer = when (StoryBackgroundAutoNextHook.visibleOuterTabIndex) {
+            1 -> StoryBackgroundAutoNextHook.upSpaceStoryPlayer
+            else -> StoryBackgroundAutoNextHook.mainFeedStoryPlayer
+        } ?: StoryBackgroundAutoNextHook.activeStoryPlayer
+        return player === tabPlayer
+    }
+
+    private fun shouldBindStorySegmentsFromPager(player: Any, requireActiveQ: Boolean = true): Boolean {
+        if (!StoryBackgroundAutoNextHook.hasActiveStory()) return false
+        if (!isVisibleOuterTabStoryPager(player)) return false
+        if (requireActiveQ && !player.isOfficialStoryPagerActive()) return false
+        return true
     }
 
     /** Resolve a story item's bvid/cid and (re)bind SponsorBlock to it. */
@@ -390,15 +431,14 @@ class SponsorBlockHook(classLoader: ClassLoader) : BaseHook(classLoader) {
         // clear cooldown or re-arm allowInsideSegmentOnce (log: reset every second → seek loop).
         if (jumpedBack && !fromUserSeek) {
             val rewoundBeforeSegment = currentSegments.any { segment ->
-                val startMs = (segment.start * 1000).toLong()
-                positionMs < startMs - CLEAR_PAST_TOLERANCE_MS
+                positionMs < segment.startMs - CLEAR_PAST_TOLERANCE_MS
             }
             if (!rewoundBeforeSegment) return
         }
         var reset = false
         currentSegments.forEach { segment ->
-            val startMs = (segment.start * 1000).toLong()
-            val endMs = (segment.end * 1000).toLong()
+            val startMs = segment.startMs
+            val endMs = segment.endMs
             val key = segment.uuid.ifBlank { "${segment.category}:${segment.start}:${segment.end}" }
             if (positionMs < endMs - CLEAR_PAST_TOLERANCE_MS) {
                 skippedSegmentUntilMs.remove(key)
@@ -539,14 +579,19 @@ class SponsorBlockHook(classLoader: ClassLoader) : BaseHook(classLoader) {
             ?: req.callMethodOrNullAs<Long?>("getAid")?.takeIf { it > 0 }?.let(::av2bv)
             ?: vod?.callMethodOrNullAs<Long?>("getAid")?.takeIf { it > 0 }?.let(::av2bv)
             ?: pendingBvid
-        if (!bvid.isNullOrBlank() && bvid.startsWith("BV")) {
-            clearStaleProgressState(bvid, cid)
-            pendingBvid = bvid
-        }
         if (cid <= 0) {
+            if (!bvid.isNullOrBlank() && bvid.startsWith("BV")) {
+                pendingBvid = bvid
+            }
+            return
+        }
+        if (StoryBackgroundAutoNextHook.hasActiveStory()) {
+            // Story: segments follow F1/x2, not neighbour prefetch playView (jadx F1 = Z0(D1)).
             return
         }
         if (!bvid.isNullOrBlank() && bvid.startsWith("BV")) {
+            clearStaleProgressState(bvid, cid)
+            pendingBvid = bvid
             updateVideo(VideoKey(bvid, cid))
             return
         }
@@ -588,6 +633,11 @@ class SponsorBlockHook(classLoader: ClassLoader) : BaseHook(classLoader) {
             ?: reqVod?.callMethodOrNullAs<Long?>("getAid")?.takeIf { it > 0 }?.let(::av2bv)
             ?: pendingBvid
         if (!bvid.isNullOrBlank() && bvid.startsWith("BV")) {
+            if (StoryBackgroundAutoNextHook.hasActiveStory()) {
+                ensurePlayerCoreHooked()
+                handler.post { adoptStoryPlayerCore() }
+                return
+            }
             updateVideo(VideoKey(bvid, cid, durationMs.coerceAtLeast(0L)))
             ensurePlayerCoreHooked()
             handler.post {
@@ -735,8 +785,8 @@ class SponsorBlockHook(classLoader: ClassLoader) : BaseHook(classLoader) {
             if (mode != SponsorBlockCategory.SkipMode.Always && mode != SponsorBlockCategory.SkipMode.Once) {
                 return@firstOrNull false
             }
-            val startMs = (it.start * 1000).toLong()
-            val endMs = (it.end * 1000).toLong()
+            val startMs = it.startMs
+            val endMs = it.endMs
             if (positionMs >= endMs - CLEAR_PAST_TOLERANCE_MS) return@firstOrNull false
             val key = it.uuid.ifBlank { "${it.category}:${it.start}:${it.end}" }
             val cooldownUntil = skippedSegmentUntilMs[key] ?: 0L
@@ -753,8 +803,8 @@ class SponsorBlockHook(classLoader: ClassLoader) : BaseHook(classLoader) {
         val key = segment.uuid.ifBlank { "${segment.category}:${segment.start}:${segment.end}" }
         allowInsideSegmentOnce = false
         val service = resolvePlayerCoreService() ?: return
-        val startMs = (segment.start * 1000).toLong()
-        val endMs = (segment.end * 1000).toLong()
+        val startMs = segment.startMs
+        val endMs = segment.endMs
         val resolvedDuration = durationMs?.takeIf { it > 0L } ?: positionSnapshot(service).let { positions ->
             (positions["getRealDuration"] ?: positions["getDuration"])?.takeIf { it > 0L }
         }
@@ -766,7 +816,7 @@ class SponsorBlockHook(classLoader: ClassLoader) : BaseHook(classLoader) {
     }
 
     private fun cooldownForSegment(segment: SponsorSegment, durationMs: Long?): Long {
-        val endMs = (segment.end * 1000).toLong()
+        val endMs = segment.endMs
         val isTail = durationMs != null && durationMs > 0L && endMs >= durationMs - TAIL_SEGMENT_MARGIN_MS
         return if (isTail) TAIL_SEGMENT_COOLDOWN_MS else SEGMENT_SKIP_COOLDOWN_MS
     }
@@ -817,8 +867,8 @@ class SponsorBlockHook(classLoader: ClassLoader) : BaseHook(classLoader) {
 
     private fun seekTo(service: Any, segment: SponsorSegment, knownDurationMs: Long? = null) {
         val methods = instance.playerCoreMethods ?: return
-        val startMs = (segment.start * 1000).toLong()
-        val endMs = (segment.end * 1000).toLong()
+        val startMs = segment.startMs
+        val endMs = segment.endMs
         val segmentLenMs = (endMs - startMs).coerceAtLeast(0L)
         val durationMs = knownDurationMs ?: positionSnapshot(service).let { positions ->
             positions["getRealDuration"] ?: positions["getDuration"]
@@ -832,9 +882,9 @@ class SponsorBlockHook(classLoader: ClassLoader) : BaseHook(classLoader) {
         val extraPad = when {
             startMs <= START_SEGMENT_MARGIN_MS && segmentLenMs < 3000L -> SHORT_SEGMENT_EXTRA_PAD_MS
             segmentLenMs < 2000L -> SHORT_SEGMENT_EXTRA_PAD_MS / 2
-            else -> SKIP_TARGET_PADDING_MS
+            else -> 0L
         }
-        var targetMs = (endMs + extraPad.toLong()).toInt()
+        var targetMs = if (extraPad > 0L) (endMs + extraPad).toInt() else endMs.toInt()
         if (durationMs != null) {
             val maxTarget = (durationMs - 200L).coerceAtLeast(endMs).toInt()
             targetMs = targetMs.coerceAtMost(maxTarget)
@@ -846,9 +896,10 @@ class SponsorBlockHook(classLoader: ClassLoader) : BaseHook(classLoader) {
             targetMs = targetMs.coerceAtLeast((beforeMs + 200L).toInt())
         }
         if (beforeMs != null && targetMs <= beforeMs + 150) return
-        invokeSeek(methods.seekTo, service, targetMs, false).onSuccess {
+        val accurate = methods.seekTo.parameterCount == 2
+        invokeSeek(methods.seekTo, service, targetMs, accurate).onSuccess {
             SponsorBlockPrefs.addStats(((targetMs.toLong() - (beforeMs ?: targetMs.toLong())) / 1000L).coerceAtLeast(0L))
-            verifySeek(service, targetMs, segment, durationMs)
+            Log.trace { "SponsorBlock: seek ok target=$targetMs end=$endMs accurate=$accurate before=$beforeMs" }
             if (SponsorBlockPrefs.showToast) {
                 Log.toast("空降：${SponsorBlockCategory.titleOf(segment.category)}")
             }
@@ -925,24 +976,6 @@ class SponsorBlockHook(classLoader: ClassLoader) : BaseHook(classLoader) {
             ?: positions["getCurrentPosition"]?.takeIf { it > 0 }
             ?: positions.values.firstOrNull { it > 0 }
             ?: positions["getCurrentPosition"]
-    }
-
-    private fun verifySeek(service: Any, targetMs: Int, segment: SponsorSegment, durationMs: Long?) {
-        val methods = instance.playerCoreMethods ?: return
-        val endMs = (segment.end * 1000).toLong()
-        if (durationMs != null && endMs >= durationMs - TAIL_SEGMENT_MARGIN_MS) return
-        handler.postDelayed({
-            val afterMs = readPositionMs(service, methods)
-            if (afterMs != null && kotlin.math.abs(afterMs - targetMs) > 3000 && methods.seekTo.parameterCount == 2) {
-                invokeSeek(methods.seekTo, service, targetMs, true).onSuccess {
-                    Log.trace { "SponsorBlock: seek retry ok method=${methodSignature(methods.seekTo)}, bool=true, target=$targetMs" }
-                }.onFailure {
-                    Log.trace { "SponsorBlock: seek retry failed method=${methodSignature(methods.seekTo)}, " +
-                            "target=$targetMs, error=${it.javaClass.name}: ${it.message}" }
-                    Log.e(it)
-                }
-            }
-        }, 300L)
     }
 
     private fun invokeSeek(method: Method, service: Any, targetMs: Int, booleanValue: Boolean): Result<Unit> =

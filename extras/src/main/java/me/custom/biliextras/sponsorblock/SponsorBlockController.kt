@@ -12,6 +12,8 @@ object SponsorBlockController {
         fun seekToSegment(segment: SponsorBlockState.SegmentView)
         fun readPlaybackPositionMs(): Long?
         fun currentSegments(): List<SponsorSegment>
+        /** Bind segments from StoryPagerPlayer.F1() on the visible active pager (jadx: adapter.Z0(D1)). */
+        fun rebindStoryFromPager(storyPagerPlayer: Any?)
     }
 
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -59,6 +61,10 @@ object SponsorBlockController {
     }
 
     fun readPlaybackPositionMs(): Long? = bridge?.readPlaybackPositionMs()
+
+    fun rebindStoryFromPager(storyPagerPlayer: Any?) {
+        bridge?.rebindStoryFromPager(storyPagerPlayer)
+    }
 
     fun findSegmentAtTimeMs(timeMs: Long): SponsorBlockState.SegmentView? =
         segments.firstOrNull { timeMs in it.startMs until it.endMs }

@@ -24,22 +24,43 @@ class BlockStoryLiveHook(classLoader: ClassLoader) : BaseHook(classLoader) {
     override fun startHook() {
         if (!ePrefs.getBoolean("block_story_live", false)) return
 
-        hookStoryPagerPlayer()
+        val playerClass = instance.storyPagerPlayerClass ?: return
+        var hooked = false
+
+        instance.addVideoMethod()?.name?.let { methodName ->
+            hookListIngress(playerClass, methodName, "addVideo")
+            hooked = true
+        } ?: Log.w { "BlockStoryLive: addVideo method not found" }
+
+        instance.insertStoryCardsMethod()?.name?.let { methodName ->
+            hookListIngress(playerClass, methodName, "insertStoryCards")
+            hooked = true
+        }
+
+        instance.updateStoryListMethod()?.name?.let { methodName ->
+            playerClass.hookMethod(
+                methodName,
+                Int::class.javaPrimitiveType!!,
+                List::class.java,
+            ) { chain ->
+                (chain.args[1] as? MutableList<Any?>)?.filterStoryLiveList()
+                chain.proceed()
+            }
+            Log.s("startHook: BlockStoryLive on ${playerClass.name}#$methodName(updateList)")
+            hooked = true
+        }
+
+        if (!hooked) {
+            Log.w { "BlockStoryLive: no StoryPagerPlayer ingress methods found" }
+        }
     }
 
-    private fun hookStoryPagerPlayer() {
-        val addVideo = instance.addVideoMethod()?.name ?: run {
-            Log.w { "BlockStoryLive: addVideo method not found" }
-            return
-        }
-        val playerClass = instance.storyPagerPlayerClass ?: return
-
-        Log.s("startHook: BlockStoryLive on ${playerClass.name}#$addVideo")
-        playerClass.hookMethod(addVideo, List::class.java) { chain ->
-            val storyDetailList = chain.args[0] as? MutableList<Any?> ?: return@hookMethod chain.proceed()
-            storyDetailList.filterStoryLiveList()
+    private fun hookListIngress(playerClass: Class<*>, methodName: String, label: String) {
+        playerClass.hookMethod(methodName, List::class.java) { chain ->
+            (chain.args[0] as? MutableList<Any?>)?.filterStoryLiveList()
             chain.proceed()
         }
+        Log.s("startHook: BlockStoryLive on ${playerClass.name}#$methodName ($label)")
     }
 
     private fun isStoryLive(item: Any, storyDetail: Class<*>): Boolean {

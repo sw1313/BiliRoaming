@@ -122,17 +122,16 @@ class SponsorBlockProgressHook(classLoader: ClassLoader) : BaseHook(classLoader)
             }
         }
 
-        val paddingLeft = seekBar.paddingLeft.toFloat()
-        val paddingRight = seekBar.paddingRight.toFloat()
-        val trackLeft = paddingLeft
-        val trackWidth = (seekBar.width - paddingLeft - paddingRight).coerceAtLeast(1f)
+        val (trackLeft, trackWidth) = seekBar.progressTrackMetrics()
         val barHeight = (seekBar.height.coerceAtMost(seekBar.dp(5))).coerceAtLeast(seekBar.dp(2)).toFloat()
         val top = ((seekBar.height - barHeight) / 2f).coerceAtLeast(0f)
         val bottom = top + barHeight
         segments.forEach { segment ->
             if (segment.endMs <= segment.startMs) return@forEach
-            val left = trackLeft + (segment.startMs.toFloat() / durationMs * trackWidth).coerceIn(0f, trackWidth)
-            val right = trackLeft + (segment.endMs.toFloat() / durationMs * trackWidth).coerceIn(left - trackLeft, trackWidth)
+            val startRatio = (segment.startMs.toFloat() / durationMs).coerceIn(0f, 1f)
+            val endRatio = (segment.endMs.toFloat() / durationMs).coerceIn(startRatio, 1f)
+            val left = trackLeft + startRatio * trackWidth
+            val right = trackLeft + endRatio * trackWidth
             if (right - left < 1f) return@forEach
             paint.color = segment.color
             paint.style = Paint.Style.FILL
@@ -204,6 +203,16 @@ class SponsorBlockProgressHook(classLoader: ClassLoader) : BaseHook(classLoader)
             return kotlin.math.abs(progressMs - playbackMs) <= 3000L
         }
         return false
+    }
+
+    /** Match AbsSeekBar thumb travel — full padding width makes segment ends sit past the TV icon. */
+    private fun SeekBar.progressTrackMetrics(): Pair<Float, Float> {
+        val paddingLeft = paddingLeft.toFloat()
+        val paddingRight = paddingRight.toFloat()
+        val thumbHalf = (thumb?.intrinsicWidth ?: 0) / 2f
+        val trackLeft = paddingLeft + thumbHalf
+        val trackWidth = (width - paddingLeft - paddingRight - 2f * thumbHalf).coerceAtLeast(1f)
+        return trackLeft to trackWidth
     }
 
     private fun ProgressBar.dp(value: Int): Int =

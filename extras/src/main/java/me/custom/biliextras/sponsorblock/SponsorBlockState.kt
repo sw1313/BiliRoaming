@@ -120,8 +120,8 @@ object SponsorBlockState {
                 null
             } else {
                 SegmentView(
-                    startMs = (segment.start * 1000).toLong().coerceAtLeast(0L),
-                    endMs = (segment.end * 1000).toLong().coerceAtLeast(0L),
+                    startMs = segment.startMs,
+                    endMs = segment.endMs,
                     category = segment.category,
                     color = SponsorBlockPrefs.colorOf(segment.category),
                     mode = mode,

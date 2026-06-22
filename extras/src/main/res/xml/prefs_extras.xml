@@ -28,9 +28,9 @@
 
         <SwitchPreference
             android:defaultValue="false"
-            android:key="block_story_ad"
-            android:summary="@string/block_story_ad_summary"
-            android:title="@string/block_story_ad_title" />
+            android:key="block_story_ad_dynamic"
+            android:summary="@string/block_story_ad_dynamic_summary"
+            android:title="@string/block_story_ad_dynamic_title" />
 
         <Preference
             android:key="story_diversion_settings"

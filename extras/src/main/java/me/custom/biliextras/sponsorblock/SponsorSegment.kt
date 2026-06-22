@@ -12,6 +12,13 @@ data class SponsorSegment(
     val duration: Double
         get() = end - start
 
+    val startMs: Long
+        get() = (start * 1000).toLong().coerceAtLeast(0L)
+
+    /** Rounded end matches SponsorBlock API sub-second boundaries for skip + progress overlay. */
+    val endMs: Long
+        get() = kotlin.math.round(end * 1000).toLong().coerceAtLeast(startMs)
+
     companion object {
         fun fromJson(obj: JSONObject): SponsorSegment? {
             val segment = obj.optJSONArray("segment") ?: return null

@@ -5,6 +5,7 @@ import android.os.Handler
 import android.os.Looper
 import android.view.ViewGroup
 import me.custom.biliextras.BiliPackageLite.Companion.instance
+import me.custom.biliextras.sponsorblock.SponsorBlockController
 import me.custom.biliextras.utils.Log
 import me.custom.biliextras.utils.ePrefs
 import me.custom.biliextras.utils.hookMethod
@@ -164,8 +165,56 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
         @Volatile
         var postResumeCatchUpRunnable: Runnable? = null
 
+        /** Saved on u2 before official w2 h1 can truncate the feed (log: count=36 → 1 before F2). */
+        @Volatile
+        var resumeHandoffIndex = -1
+
+        @Volatile
+        var resumeHandoffId: String? = null
+
+        @Volatile
+        var resumeHandoffCount = -1
+
+        @Volatile
+        var resumeHandoffPlayerId = -1
+
+        /** StoryDetail items snapshotted on u2; restored when w2 h1 collapses the chain (log: 39→1). */
+        @Volatile
+        var resumeFeedSnapshot: List<Any>? = null
+
+        @Volatile
+        var resumeFeedRestoreInProgress = false
+
+        @Volatile
+        var blockDestructiveH1UntilMs = 0L
+
+        /** Main-feed video identity to carry when switching outer tab to UP space (and reverse). */
+        @Volatile
+        var outerTabHandoffId: String? = null
+
+        @Volatile
+        var outerTabHandoffSourceHost: String? = null
+
+        /** Set on outer tab switch; consumed by the target tab's w2 or a short delayed catch-up. */
+        @Volatile
+        var outerTabHandoffPending = false
+
+        @Volatile
+        var outerTabHandoffSetAtMs = 0L
+
+        @Volatile
+        var outerTabHandoffCatchUpRunnable: Runnable? = null
+
+        /** Only apply outer-tab handoff shortly after a visible tab switch (log 02:34:37 stale 26min id). */
+        private const val OUTER_TAB_HANDOFF_TTL_MS = 5_000L
+
         @Volatile
         var endPollingRunnable: Runnable? = null
+
+        fun cancelOuterTabHandoffCatchUp() {
+            outerTabHandoffCatchUpRunnable?.let { mainHandler.removeCallbacks(it) }
+            outerTabHandoffCatchUpRunnable = null
+        }
 
         fun cancelPostResumeCatchUp() {
             postResumeCatchUpRunnable?.let { mainHandler.removeCallbacks(it) }
@@ -183,6 +232,12 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
 
         fun finishAppBackgroundResumeSession() {
             appBackgroundResumeHandoffEligible = false
+            resumeHandoffIndex = -1
+            resumeHandoffId = null
+            resumeHandoffCount = -1
+            resumeHandoffPlayerId = -1
+            resumeFeedSnapshot = null
+            blockDestructiveH1UntilMs = 0L
         }
 
         /** Clear our seek-on-prepare seed so the next item does not inherit bg resume position. */
@@ -405,6 +460,131 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
         }
     }
 
+    private fun clearOuterTabHandoff() {
+        outerTabHandoffId = null
+        outerTabHandoffSourceHost = null
+        outerTabHandoffPending = false
+        outerTabHandoffSetAtMs = 0L
+        cancelOuterTabHandoffCatchUp()
+    }
+
+    private fun scheduleOuterTabHandoffCatchUp() {
+        if (!outerTabHandoffPending) return
+        cancelOuterTabHandoffCatchUp()
+        val runnable = Runnable {
+            outerTabHandoffCatchUpRunnable = null
+            if (!outerTabHandoffPending || activityPaused || isInBackground) return@Runnable
+            if (System.currentTimeMillis() - outerTabHandoffSetAtMs > OUTER_TAB_HANDOFF_TTL_MS) {
+                clearOuterTabHandoff()
+                return@Runnable
+            }
+            val player = when (visibleSessionHost()) {
+                HOST_SPACE -> upSpaceStoryPlayer
+                else -> mainFeedStoryPlayer
+            } ?: activeStoryPlayer ?: run {
+                clearOuterTabHandoff()
+                return@Runnable
+            }
+            if (player.playerHostName() != visibleSessionHost()) return@Runnable
+            player.trySyncOuterTabHandoff()
+            if (outerTabHandoffPending) clearOuterTabHandoff()
+        }
+        outerTabHandoffCatchUpRunnable = runnable
+        mainHandler.postDelayed(runnable, 900L)
+    }
+
+    /** Save the leaving tab's playing video before session keys are cleared for the target tab w2(). */
+    private fun captureOuterTabHandoffBeforeSwitch() {
+        val targetHost = visibleSessionHost()
+        val sourcePlayer = when (targetHost) {
+            HOST_SPACE -> mainFeedStoryPlayer
+            else -> upSpaceStoryPlayer
+        }
+        val sourceD1 = sourcePlayer?.invokeIntGetter("D1", "getIndex") ?: -1
+        // jadx: F1 = adapter.Z0(D1); engine l() can lag after swipe (log 034854: stale cid on tab switch).
+        outerTabHandoffId = sourcePlayer?.currentStoryIdentity()
+            ?: if (sourceD1 >= 0) sourcePlayer?.storyIdentityAt(sourceD1) else null
+            ?: sourcePlayer?.captureEnginePlayingIdentity()
+            ?: playingStoryKey
+            ?: activeStoryKey
+        outerTabHandoffSourceHost = when (targetHost) {
+            HOST_SPACE -> HOST_MAIN
+            else -> HOST_SPACE
+        }
+        if (outerTabHandoffId != null) {
+            outerTabHandoffPending = true
+            outerTabHandoffSetAtMs = System.currentTimeMillis()
+            Log.trace {
+                "StoryAutoNext: outer tab handoff from $outerTabHandoffSourceHost " +
+                    "id=$outerTabHandoffId -> $targetHost"
+            }
+        } else {
+            outerTabHandoffSourceHost = null
+            outerTabHandoffPending = false
+            outerTabHandoffSetAtMs = 0L
+        }
+    }
+
+    private fun Any.shouldSyncOuterTabHandoff(): Boolean {
+        if (!outerTabHandoffPending) return false
+        if (appBackgroundResumeHandoffEligible) return false
+        if (System.currentTimeMillis() - outerTabHandoffSetAtMs > OUTER_TAB_HANDOFF_TTL_MS) {
+            Log.trace { "StoryAutoNext: outer tab handoff expired id=$outerTabHandoffId" }
+            clearOuterTabHandoff()
+            return false
+        }
+        val handoffId = outerTabHandoffId ?: return false
+        val sourceHost = outerTabHandoffSourceHost ?: return false
+        val myHost = playerHostName() ?: return false
+        if (myHost != visibleSessionHost()) return false
+        if (myHost == sourceHost) return false
+        return handoffId.isNotBlank()
+    }
+
+    /** Align target-tab pager to the video the user was watching on the other outer tab. */
+    private fun Any.trySyncOuterTabHandoff(): Boolean {
+        if (!shouldSyncOuterTabHandoff()) return false
+        val handoffId = outerTabHandoffId ?: return false
+        val d1 = invokeIntGetter("D1", "getIndex") ?: -1
+        val pagerId = if (d1 >= 0) storyIdentityAt(d1) else null
+        if (pagerId != null && identitiesMatch(pagerId, handoffId)) {
+            clearOuterTabHandoff()
+            playingStoryKey = handoffId
+            activeStoryKey = handoffId
+            trackedIndex = d1
+            liveEngineIndex = d1
+            trackedIndexHost = playerHostName()
+            Log.trace { "StoryAutoNext: outer tab handoff already at d1=$d1 id=$handoffId" }
+            return true
+        }
+        val idx = indexOfStoryIdentity(handoffId)
+        if (idx < 0) {
+            Log.trace {
+                "StoryAutoNext: outer tab handoff miss id=$handoffId count=${invokeIntGetter("N1")}"
+            }
+            clearOuterTabHandoff()
+            return false
+        }
+        // User swiped ahead on this tab — never F2 backward for a stale/wrong handoff id (log 034854: d1=1 -> 0).
+        if (d1 > idx && pagerId != null && !identitiesMatch(pagerId, handoffId)) {
+            Log.trace {
+                "StoryAutoNext: outer tab handoff skip backward F2 d1=$d1 -> $idx " +
+                    "current=$pagerId handoff=$handoffId"
+            }
+            clearOuterTabHandoff()
+            return false
+        }
+        Log.trace { "StoryAutoNext: outer tab handoff F2 d1=$d1 -> $idx id=$handoffId" }
+        return runCatching {
+            syncPagerToEngineIndex(idx, handoffId)
+            clearOuterTabHandoff()
+            true
+        }.getOrElse {
+            Log.e(it)
+            false
+        }
+    }
+
     /**
      * Outer tab switch while activity is still visible — not true background; stop bg polling.
      * Do NOT sync trackedIndex here: onPageSelected runs before the target tab's w2() resumes
@@ -412,6 +592,7 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
      */
     private fun reconcileForegroundOnOuterTabSwitch() {
         if (activityPaused) return
+        captureOuterTabHandoffBeforeSwitch()
         if (isInBackground || polling) {
             isInBackground = false
             backgroundSessionHost = null
@@ -436,6 +617,7 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
             HOST_SPACE -> upSpaceStoryPlayer?.let { activeStoryPlayer = it }
             else -> mainFeedStoryPlayer?.let { activeStoryPlayer = it }
         }
+        scheduleOuterTabHandoffCatchUp()
     }
 
     private fun Any.syncVisibleTabTrackingAfterW2() {
@@ -496,6 +678,8 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
         tailWaitKey = null
         pagerSyncInProgressPlayerId = -1
         officialX2RebindInProgress = false
+        clearOuterTabHandoff()
+        resumeFeedSnapshot = null
         cancelForegroundResumeHandoff()
         stopEndPolling()
         Log.trace { "StoryAutoNext: reset session ($reason)" }
@@ -698,6 +882,7 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
             }
             tailWaitKey = null
         }
+        SponsorBlockController.rebindStoryFromPager(this)
         Log.trace { "StoryAutoNext: sync tracking d1=$d1 host=$host full=$full source=$source " +
                 "(live=$liveEngineIndex tracked=$trackedIndex id=$playingStoryKey)" }
     }
@@ -772,6 +957,9 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
         targetId: String?,
         attempt: Int = 0,
     ) {
+        if (attempt == 0) {
+            restoreResumeFeedSnapshotIfNeeded()
+        }
         val resolved = resolveCatchUpIndex(preferredIndex, targetId)
         if (resolved < 0) {
             if (attempt < 4) {
@@ -872,9 +1060,21 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
             Log.trace { "StoryAutoNext: F2 sync skipped — pager already shows target id=$targetId d1=$d1" }
             return
         }
+        val count = invokeIntGetter("N1") ?: 0
         Log.trace { "StoryAutoNext: F2 sync gave up — official pager metadata index=$syncIndex " +
-                "id=$targetId d1=$d1 F1=${currentStoryIdentity()}" }
-        syncOfficialPagerMetadata(syncIndex, smooth = false, targetId)
+                "id=$targetId d1=$d1 count=$count F1=${currentStoryIdentity()}" }
+        if (syncIndex >= count && targetId != null &&
+            identitiesMatch(captureEnginePlayingIdentity(), targetId)
+        ) {
+            seedNativeStartFromEngineIfNeeded()
+            trackedIndex = syncIndex
+            liveEngineIndex = syncIndex
+            playingStoryKey = targetId
+            activeStoryKey = targetId
+            Log.trace { "StoryAutoNext: feed truncated — keep engine session id=$targetId idx=$syncIndex" }
+        } else {
+            syncOfficialPagerMetadata(syncIndex, smooth = false, targetId)
+        }
         if (isInBackground) {
             val engineId = captureEnginePlayingIdentity()
             if (targetId == null || !identitiesMatch(engineId, targetId)) {
@@ -1300,6 +1500,20 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
         if (host != null && trackedIndexHost != null && host != trackedIndexHost && !backgroundEngineMoved) {
             return -1
         }
+        resolveStalePagerCatchUpIndex(pagerIndex).takeIf { it >= 0 }?.let { return it }
+        if (resumeHandoffIndex >= 0 && resumeHandoffIndex > pagerIndex &&
+            (resumeHandoffCount < 0 || resumeHandoffCount > pagerIndex)
+        ) {
+            val pagerId = if (pagerIndex >= 0) storyIdentityAt(pagerIndex) else null
+            if (resumeHandoffId == null || pagerId == null ||
+                !identitiesMatch(resumeHandoffId, pagerId)
+            ) {
+                return resumeHandoffIndex
+            }
+            if (resumeHandoffIndex >= resumeHandoffCount) {
+                return resumeHandoffIndex
+            }
+        }
         val playingId = captureEnginePlayingIdentity() ?: playingStoryKey ?: activeStoryKey
         val pagerId = if (pagerIndex >= 0) storyIdentityAt(pagerIndex) else null
         if (playingId != null && pagerId != null && identitiesMatch(playingId, pagerId)) {
@@ -1370,6 +1584,25 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
         }
         hookStoryPlayerLooping()
         hookForegroundSync(playerClass)
+        playerClass.hookMethod("h1", List::class.java) { chain ->
+            val incoming = chain.args.firstOrNull() as? List<*>
+            val player = chain.thisObject
+            if (incoming != null && player.shouldBlockDestructiveH1(incoming)) {
+                return@hookMethod null
+            }
+            chain.proceed()
+        }
+        playerClass.declaredMethods.firstOrNull {
+            it.name == "W2" && it.parameterCount == 3 &&
+                it.parameterTypes[0] == List::class.java
+        }?.hookMethod { chain ->
+            val incoming = chain.args[0] as? List<*> ?: return@hookMethod chain.proceed()
+            val player = chain.thisObject
+            if (player.shouldBlockDeferredW2Replace(incoming)) {
+                return@hookMethod null
+            }
+            chain.proceed()
+        }
         playerClass.hookMethod(addVideo, List::class.java) { chain ->
             val firstItem = (chain.args[0] as? List<*>)?.firstOrNull()
             val player = chain.thisObject
@@ -1412,11 +1645,21 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
                 ?: playerHostByInstance[System.identityHashCode(player)]
             if (host != null && host.javaClass.name == HOST_SPACE &&
                 player === activeStoryPlayer &&
-                (prevHost == HOST_MAIN || prevHost == null) &&
-                backgroundEngineMoved && backgroundEngineHost == HOST_MAIN
+                (prevHost == HOST_MAIN || prevHost == null)
             ) {
-                // Main-feed bg auto-next ran ahead; align pager before UP-space host binds (I2).
-                player.ensurePagerAlignedForNavigation()
+                when {
+                    backgroundEngineMoved && backgroundEngineHost == HOST_MAIN ->
+                        player.ensurePagerAlignedForNavigation()
+                    player.shouldSyncOuterTabHandoff() ->
+                        player.trySyncOuterTabHandoff()
+                }
+            }
+            if (host != null && host.javaClass.name == HOST_MAIN &&
+                player === activeStoryPlayer &&
+                prevHost == HOST_SPACE &&
+                player.shouldSyncOuterTabHandoff()
+            ) {
+                player.trySyncOuterTabHandoff()
             }
             val result = chain.proceed()
             rememberStoryPlayerHost(player, host)
@@ -1475,18 +1718,29 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
             u2PauseMethod.hookMethod { chain ->
                 val player = chain.thisObject
                 if (player.shouldManageBackgroundLoopMode() && activityPaused) {
+                    clearOuterTabHandoff()
                     cancelForegroundResumeHandoff()
                     appBackgroundResumeHandoffEligible = true
                     backgroundSessionHost = visibleSessionHost()
                     isInBackground = true
                     captureActiveStoryPlayer(player)
+                    val d1OnPause = player.invokeIntGetter("D1", "getIndex") ?: -1
+                    player.captureResumeHandoffIfNeeded(d1OnPause)
                     if (backgroundEngineMoved) {
                         player.realignEngineTrackingToPager("u2")
-                    } else {
-                        val d1OnPause = player.invokeIntGetter("D1", "getIndex") ?: -1
-                        if (d1OnPause >= 0 &&
-                            (liveEngineIndex > d1OnPause || trackedIndex > d1OnPause)
+                    } else if (d1OnPause >= 0 &&
+                        (liveEngineIndex > d1OnPause || trackedIndex > d1OnPause)
+                    ) {
+                        if (player.isStalePagerVersusSession(d1OnPause) ||
+                            resumeHandoffIndex > d1OnPause ||
+                            trackedIndex > d1OnPause ||
+                            liveEngineIndex > d1OnPause
                         ) {
+                            Log.trace {
+                                "StoryAutoNext: u2 keep session tracked=$trackedIndex live=$liveEngineIndex " +
+                                    "(d1=$d1OnPause stale pager after recreate)"
+                            }
+                        } else {
                             player.realignEngineTrackingToPager("u2-stale-track", force = true)
                         }
                     }
@@ -1512,15 +1766,23 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
                 val managesBg = player.shouldManageBackgroundLoopMode()
                 val pagerBefore = player.invokeIntGetter("D1", "getIndex") ?: -1
                 val pendingIndex = player.resolvePendingEngineIndex(pagerBefore)
-                val engineIdNow = player.captureEnginePlayingIdentity()
-                val pendingId = engineIdNow ?: playingStoryKey ?: activeStoryKey
-                if (pendingIndex >= 0) {
-                    Log.trace { "StoryAutoNext: w2 pending F2 sync engine=$pendingIndex " +
+                val appBgResume = appBackgroundResumeHandoffEligible
+                val pendingId = when {
+                    resumeHandoffIndex > pagerBefore && resumeHandoffId != null -> resumeHandoffId
+                    appBgResume && resumeHandoffId != null -> resumeHandoffId
+                    else -> player.captureEnginePlayingIdentity()
+                        ?: playingStoryKey ?: activeStoryKey ?: resumeHandoffId
+                }
+                val catchUpIndex = when {
+                    pendingIndex >= 0 -> pendingIndex
+                    else -> player.resolveStalePagerCatchUpIndex(pagerBefore)
+                }
+                if (catchUpIndex >= 0) {
+                    Log.trace { "StoryAutoNext: w2 pending F2 sync engine=$catchUpIndex " +
                             "pager=$pagerBefore id=$pendingId moved=$backgroundEngineMoved " +
                             "host=$playerHost tag=${player.storyPagerTag()} active=${player === activeStoryPlayer}" }
                 }
-                val runSync = player.shouldRunW2PagerSync(pendingIndex, pagerBefore)
-                val appBgResume = appBackgroundResumeHandoffEligible
+                val runSync = catchUpIndex >= 0 && player.shouldRunW2PagerSync(catchUpIndex, pagerBefore)
                 if (player.shouldCaptureForegroundResumeHandoff(runSync, managesBg)) {
                     player.beginForegroundResumeHandoff(pendingId, runSync)
                 }
@@ -1533,37 +1795,55 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
                         applyBackgroundLoopMode(player, autoNext = false)
                     }
                 }
+                val outerHandoffBeforeProceed = if (!runSync && !appBgResume) {
+                    player.trySyncOuterTabHandoff()
+                } else {
+                    false
+                }
+                val preW2Synced = if (runSync) {
+                    player.trySyncPagerBeforeW2Proceed(catchUpIndex, pendingId, pagerBefore)
+                } else {
+                    false
+                }
+                if (appBgResume) {
+                    player.guardOfficialW2FeedFlushBeforeResume()
+                }
                 // Official w2: I=true, adapter.onResume(), flush f208484w via h1 (never W2 here).
                 chain.proceed()
+                if (runSync && !preW2Synced && appBgResume) {
+                    player.restoreResumeFeedSnapshotIfNeeded()
+                }
                 when {
-                    pendingIndex < 0 -> {
-                        // No F2 gap — official progress/D1 ok, but i3→x2 may still skip surface (+has play).
+                    preW2Synced -> {
                         player.syncVisibleTabTrackingAfterW2()
-                        if (upSpaceEntry && !isInBackground) {
-                            player.syncPlayerTrackingFromPager("w2-space", full = false)
-                        }
-                        player.refreshOfficialSurfaceAfterBgResume(managesBg, runSync, appBgResume)
+                        player.syncStoryPlayerDirectorIndex(catchUpIndex)
+                        clearBackgroundSession(catchUpIndex, pendingId)
+                        player.rebindOfficialSurfaceAtD1("x2 after pre-w2 F2")
                         player.completeW2ResumeHandoffCycle()
                     }
-                    !runSync -> {
-                        player.syncVisibleTabTrackingAfterW2()
-                        if (upSpaceEntry && !isInBackground) {
-                            player.syncPlayerTrackingFromPager("w2-space", full = false)
-                        }
-                        Log.trace { "StoryAutoNext: w2 skip F2 sync host=$playerHost " +
-                                "tag=${player.storyPagerTag()} engine=$pendingIndex " +
-                                "bgHost=$backgroundEngineHost active=${player === activeStoryPlayer}" }
-                        player.refreshOfficialSurfaceAfterBgResume(managesBg, runSync, appBgResume)
-                        player.completeW2ResumeHandoffCycle()
-                    }
-                    else -> {
+                    runSync -> {
                         cancelPostResumeCatchUp()
                         runCatching {
-                            player.syncPagerToEngineIndex(pendingIndex, pendingId)
+                            player.syncPagerToEngineIndex(catchUpIndex, pendingId)
                         }.onFailure {
                             Log.e(it)
                             player.completeW2ResumeHandoffCycle()
                         }
+                    }
+                    else -> {
+                        val outerHandoffSynced = outerHandoffBeforeProceed ||
+                            player.trySyncOuterTabHandoff()
+                        player.syncVisibleTabTrackingAfterW2()
+                        if (!outerHandoffSynced && upSpaceEntry && !isInBackground) {
+                            player.syncPlayerTrackingFromPager("w2-space", full = false)
+                        }
+                        if (!runSync && catchUpIndex >= 0) {
+                            Log.trace { "StoryAutoNext: w2 skip F2 sync host=$playerHost " +
+                                    "tag=${player.storyPagerTag()} engine=$catchUpIndex " +
+                                    "bgHost=$backgroundEngineHost active=${player === activeStoryPlayer}" }
+                        }
+                        player.refreshOfficialSurfaceAfterBgResume(managesBg, runSync, appBgResume)
+                        player.completeW2ResumeHandoffCycle()
                     }
                 }
                 hookRuntimeTargets(player)
@@ -1649,6 +1929,46 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
     }.getOrNull()
 
     /** Identity (bvid/cid) of the adapter item at the given index (V1). */
+    private fun Any.storyItemAt(index: Int): Any? = runCatching {
+        if (index < 0) return null
+        val v1 = javaClass.methods.firstOrNull {
+            it.name == "V1" && it.parameterTypes.contentEquals(arrayOf(Int::class.javaPrimitiveType))
+        } ?: return null
+        v1.invoke(this, index)
+    }.getOrNull()
+
+    /** Ad/live cards have no stable BV id — engine/pager sync breaks if background auto-next stops on them. */
+    private fun isBackgroundAutoNextUnsafeCard(item: Any): Boolean {
+        val type = item.javaClass
+        fun bool(name: String) = runCatching {
+            type.getDeclaredMethod(name).apply { isAccessible = true }.invoke(item) as? Boolean
+        }.getOrNull() == true
+        return bool("isAd") || bool("isLive")
+    }
+
+    private fun Any.isUnsafeStoryIndex(index: Int): Boolean {
+        val item = storyItemAt(index) ?: return false
+        return isBackgroundAutoNextUnsafeCard(item)
+    }
+
+    /** Prefer BV-backed UGC when pause/resume lands on ad/live (unknown/cid). */
+    private fun Any.preferredResumeIdentity(d1: Int): String? {
+        if (d1 >= 0 && !isUnsafeStoryIndex(d1)) {
+            storyIdentityAt(d1)?.let { return it }
+        }
+        val count = invokeIntGetter("N1") ?: 0
+        if (d1 >= 0) {
+            for (i in d1 downTo 0) {
+                if (!isUnsafeStoryIndex(i)) return storyIdentityAt(i)
+            }
+            for (i in (d1 + 1) until count) {
+                if (!isUnsafeStoryIndex(i)) return storyIdentityAt(i)
+            }
+        }
+        return null
+    }
+
+    /** Identity (bvid/cid) of the adapter item at the given index (V1). */
     private fun Any.storyIdentityAt(index: Int): String? = runCatching {
         if (index < 0) return null
         val v1 = javaClass.methods.firstOrNull {
@@ -1661,6 +1981,200 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
     private fun storyIdentityAt(index: Int): String? = activeStoryPlayer?.storyIdentityAt(index)
 
     private fun currentStoryIdentity(): String? = activeStoryPlayer?.currentStoryIdentity()
+
+    /**
+     * After Activity recreate, ViewPager D1 resets to 0 while the engine/session stayed on a
+     * later item (log: w2 keep session tracked=22 d1=0, then u2-stale-track wrongly realigned to 0).
+     */
+    private fun Any.isStalePagerVersusSession(d1: Int): Boolean {
+        if (d1 < 0) return false
+        val sessionIdx = maxOf(
+            liveEngineIndex,
+            trackedIndex,
+            backgroundEngineIndex,
+            resumeHandoffIndex,
+        ).coerceAtLeast(-1)
+        return sessionIdx > d1
+    }
+
+    private fun Any.resolveStalePagerCatchUpIndex(pagerIndex: Int): Int {
+        if (pagerIndex < 0 || !isStalePagerVersusSession(pagerIndex)) return -1
+        return maxOf(
+            liveEngineIndex,
+            trackedIndex,
+            backgroundEngineIndex,
+            resumeHandoffIndex,
+            captureEnginePlayingIndex(),
+        ).coerceAtLeast(0)
+    }
+
+    /** u2: save feed size + session before official w2 h1 can replace the list with a single item. */
+    private fun Any.captureResumeHandoffIfNeeded(d1OnPause: Int) {
+        val feedCount = invokeIntGetter("N1") ?: -1
+        val currentId = preferredResumeIdentity(d1OnPause)
+            ?: playingStoryKey ?: activeStoryKey ?: captureEnginePlayingIdentity()
+        val sessionIdx = maxOf(
+            liveEngineIndex,
+            trackedIndex,
+            backgroundEngineIndex,
+            captureEnginePlayingIndex(),
+        ).coerceAtLeast(-1)
+        if (feedCount >= 2) {
+            resumeHandoffCount = feedCount
+            resumeHandoffPlayerId = System.identityHashCode(this)
+            blockDestructiveH1UntilMs = System.currentTimeMillis() + 15_000L
+            if (currentId != null) resumeHandoffId = currentId
+            captureResumeFeedSnapshot()?.let { snap ->
+                resumeFeedSnapshot = snap
+                Log.trace {
+                    "StoryAutoNext: snapshot feed size=${snap.size} idx=$resumeHandoffIndex id=$currentId"
+                }
+            }
+        }
+        if (sessionIdx < 0 && d1OnPause < 0) return
+        if (sessionIdx <= d1OnPause && !isStalePagerVersusSession(d1OnPause)) {
+            if (feedCount >= 2) {
+                resumeHandoffIndex = maxOf(sessionIdx, d1OnPause).coerceAtLeast(0)
+                Log.trace {
+                    "StoryAutoNext: capture resume handoff idx=${resumeHandoffIndex} count=$feedCount " +
+                        "id=$currentId (h1-guard)"
+                }
+            }
+            return
+        }
+        val idx = maxOf(sessionIdx, d1OnPause).coerceAtLeast(0)
+        resumeHandoffIndex = idx
+        resumeHandoffId = currentId
+        resumeHandoffCount = feedCount
+        resumeHandoffPlayerId = System.identityHashCode(this)
+        blockDestructiveH1UntilMs = System.currentTimeMillis() + 15_000L
+        Log.trace {
+            "StoryAutoNext: capture resume handoff idx=$idx count=$resumeHandoffCount id=$resumeHandoffId"
+        }
+    }
+
+    /** Copy adapter chain on u2 so w2 can rebuild it if official h1 collapses N1. */
+    private fun Any.captureResumeFeedSnapshot(): List<Any>? = runCatching {
+        val count = invokeIntGetter("N1") ?: return@runCatching null
+        if (count < 2) return@runCatching null
+        val v1 = javaClass.methods.firstOrNull {
+            it.name == "V1" && it.parameterTypes.contentEquals(arrayOf(Int::class.javaPrimitiveType))
+        } ?: return@runCatching null
+        val items = ArrayList<Any>(count)
+        for (i in 0 until count) {
+            v1.invoke(this, i)?.let { items.add(it) }
+        }
+        items.takeIf { it.size >= 2 }
+    }.getOrNull()
+
+    /**
+     * Re-apply saved feed when w2/h1 left N1 truncated (not just wrong D1).
+     * Invokes official h1 with the u2 snapshot — bypasses shrink guard because size matches snapshot.
+     */
+    private fun Any.restoreResumeFeedSnapshotIfNeeded(): Boolean {
+        if (resumeFeedRestoreInProgress) return false
+        val snapshot = resumeFeedSnapshot ?: return false
+        if (snapshot.size < 2 || resumeHandoffCount < 2) return false
+        val countBefore = invokeIntGetter("N1") ?: 0
+        if (countBefore >= resumeHandoffCount) {
+            resumeFeedSnapshot = null
+            return false
+        }
+        return runCatching {
+            resumeFeedRestoreInProgress = true
+            val h1 = javaClass.methods.firstOrNull {
+                it.name == "h1" && it.parameterCount == 1 &&
+                    List::class.java.isAssignableFrom(it.parameterTypes[0])
+            } ?: return@runCatching false
+            h1.invoke(this, snapshot)
+            val countAfter = invokeIntGetter("N1") ?: 0
+            Log.trace {
+                "StoryAutoNext: restore feed snapshot items=${snapshot.size} " +
+                    "count $countBefore->$countAfter resumeIdx=$resumeHandoffIndex"
+            }
+            resumeFeedSnapshot = null
+            countAfter >= snapshot.size || countAfter > countBefore
+        }.getOrElse {
+            Log.e(it)
+            false
+        }.also {
+            resumeFeedRestoreInProgress = false
+        }
+    }
+
+    /** Block w2 deferred h1 that shrinks the fg session feed (log: count=39 → 1). */
+    private fun Any.shouldBlockDestructiveH1(incoming: List<*>): Boolean {
+        if (resumeFeedRestoreInProgress) return false
+        if (System.currentTimeMillis() > blockDestructiveH1UntilMs) return false
+        if (resumeHandoffCount < 2) return false
+        val host = playerHostName()
+        if (host != null && host != visibleSessionHost()) return false
+        if (incoming.size >= resumeHandoffCount) return false
+        resumeHandoffId?.let { targetId ->
+            val incomingHasTarget = incoming.any { item ->
+                identitiesMatch(item?.storyIdentity(), targetId)
+            }
+            if (incomingHasTarget &&
+                resumeHandoffIndex >= 0 &&
+                resumeHandoffIndex < incoming.size
+            ) {
+                return false
+            }
+        }
+        if (resumeHandoffCount > incoming.size) {
+            Log.trace {
+                "StoryAutoNext: block destructive h1 shrink $resumeHandoffCount->${incoming.size} " +
+                    "resumeIdx=$resumeHandoffIndex id=$resumeHandoffId"
+            }
+            return true
+        }
+        return false
+    }
+
+    /**
+     * F2 while the adapter still holds the full fg chain — official w2 h1 flush runs in proceed()
+     * and can collapse N1 to 1 before post-proceed F2 (log 175335: engine=35 count=1).
+     */
+    private fun Any.trySyncPagerBeforeW2Proceed(
+        preferredIndex: Int,
+        targetId: String?,
+        pagerBefore: Int,
+    ): Boolean {
+        if (preferredIndex < 0 || !shouldRunW2PagerSync(preferredIndex, pagerBefore)) return false
+        restoreResumeFeedSnapshotIfNeeded()
+        var count = invokeIntGetter("N1") ?: 0
+        val idIndex = if (targetId != null) indexOfStoryIdentity(targetId) else -1
+        if (count <= preferredIndex && idIndex < 0) {
+            Log.trace {
+                "StoryAutoNext: pre-w2 F2 skipped — count=$count need>$preferredIndex id=$targetId"
+            }
+            return false
+        }
+        val resolved = resolveCatchUpIndex(preferredIndex, targetId)
+        if (resolved < 0) return false
+        Log.trace {
+            "StoryAutoNext: pre-w2 F2 sync engine=$resolved pager=$pagerBefore count=$count id=$targetId"
+        }
+        applyOfficialResumePosition()
+        withStoryPagerActiveFlag {
+            callOfficialPagerAdvance(resolved, smooth = false)
+            syncOfficialPagerIndex(resolved)
+            trackedIndex = resolved
+            liveEngineIndex = resolved
+            targetId?.let {
+                playingStoryKey = it
+                activeStoryKey = it
+            }
+        }
+        val d1 = invokeIntGetter("D1", "getIndex") ?: -1
+        val pagerId = if (d1 >= 0) storyIdentityAt(d1) else null
+        val ok = d1 == resolved &&
+            (targetId == null || identitiesMatch(pagerId, targetId))
+        if (ok) {
+            Log.trace { "StoryAutoNext: pre-w2 F2 ok index=$resolved id=$targetId d1=$d1" }
+        }
+        return ok
+    }
 
     /**
      * When the user swipes back in foreground (pager index drops) but a prior background session
@@ -1760,7 +2274,9 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
 
     /**
      * Map engine index to pager index. Prefer the canonical engine slot when identity matches
-     * there; otherwise pick the duplicate closest to preferredIndex (not global firstAny tail).
+     * there; otherwise pick the duplicate closest to [preferredIndex] (not global firstAny tail).
+     * After bg feed refresh the same id may sit at a lower index than [preferredIndex] — still
+     * follow identity (official nq() uses aid/cid only).
      */
     private fun Any.resolveCatchUpIndex(preferredIndex: Int, targetId: String?): Int {
         val count = invokeIntGetter("N1") ?: 0
@@ -1770,6 +2286,14 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
             if (identitiesMatch(atPreferred, targetId)) {
                 return preferredIndex
             }
+        }
+        if (preferredIndex >= count &&
+            resumeHandoffIndex == preferredIndex &&
+            resumeHandoffId != null &&
+            targetId != null &&
+            identitiesMatch(resumeHandoffId, targetId)
+        ) {
+            return -1
         }
         if (targetId != null) {
             var best = -1
@@ -1784,7 +2308,9 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
             }
             if (best >= 0) {
                 if (best != preferredIndex) {
-                    Log.trace { "StoryAutoNext: resolve by id $targetId engine=$preferredIndex -> $best count=$count" }
+                    Log.trace {
+                        "StoryAutoNext: resolve by id $targetId preferred=$preferredIndex -> $best count=$count"
+                    }
                 }
                 return best
             }
@@ -1808,11 +2334,10 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
         return false
     }
 
-    /** StoryPagerPlayer.h1 defer buffer (f208484w); clear after bg append to avoid w2 double-flush. */
+    /** StoryPagerPlayer.h1 defer buffer (f208484w / field `w`); clear after bg append to avoid w2 double-flush. */
     private fun Any.clearDeferredFeedQueue(): Int = runCatching {
-        val field = javaClass.declaredFields.firstOrNull { f ->
-            java.util.ArrayList::class.java.isAssignableFrom(f.type)
-        } ?: return@runCatching 0
+        val field = javaClass.declaredFields.firstOrNull { it.name == "w" }
+            ?: return@runCatching 0
         field.isAccessible = true
         @Suppress("UNCHECKED_CAST")
         val list = field.get(this) as? ArrayList<Any?> ?: return@runCatching 0
@@ -1820,11 +2345,75 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
         val first = list.firstOrNull() ?: return@runCatching 0
         if (!first.javaClass.name.contains("StoryDetail")) return@runCatching 0
         val n = list.size
-        list.clear()
+        field.set(this, null)
+        runCatching {
+            javaClass.getDeclaredField("x").apply { isAccessible = true }.setBoolean(this, false)
+        }
         n
     }.getOrElse {
         Log.e(it)
         0
+    }
+
+    /** jadx StoryPagerPlayer.h2(): I || Q==2 — when false, W2/h1 defer into field `w`. */
+    private fun Any.isOfficialPagerActive(): Boolean {
+        val resumed = runCatching {
+            javaClass.getDeclaredField("I").apply { isAccessible = true }.getBoolean(this)
+        }.getOrNull() ?: false
+        val q = invokeIntGetter("Q") ?: 0
+        return resumed || q == 2
+    }
+
+    private fun isResumeHandoffArmed(): Boolean =
+        System.currentTimeMillis() <= blockDestructiveH1UntilMs && resumeHandoffCount >= 2
+
+    private fun Any.officialDeferredFeedQueueSize(): Int = runCatching {
+        javaClass.getDeclaredField("w").apply { isAccessible = true }
+            .get(this)?.let { (it as? List<*>)?.size } ?: 0
+    }.getOrDefault(0)
+
+    private fun Any.officialDeferredFeedIsFullReplace(): Boolean = runCatching {
+        javaClass.getDeclaredField("x").apply { isAccessible = true }.getBoolean(this)
+    }.getOrDefault(false)
+
+    /** Drop f208484w before w2(); official w2 with f208485x=true calls W2/F1 and wipes the chain. */
+    private fun Any.clearOfficialDeferredFeedQueue() {
+        runCatching {
+            javaClass.getDeclaredField("w").apply { isAccessible = true }.set(this, null)
+            javaClass.getDeclaredField("x").apply { isAccessible = true }.setBoolean(this, false)
+        }.onFailure { Log.e(it) }
+    }
+
+    /**
+     * jadx w2(): flush f208484w — if f208485x then W2/F1 (clear+replace), else h1/P0 (append).
+     * Background API often queues a 1-card W2 while I=false; w2 then replaces 39 items with 1.
+     */
+    private fun Any.guardOfficialW2FeedFlushBeforeResume() {
+        if (!isResumeHandoffArmed()) return
+        val n1 = invokeIntGetter("N1") ?: 0
+        if (n1 == 0) {
+            restoreResumeFeedSnapshotIfNeeded()
+        }
+        if (!officialDeferredFeedIsFullReplace()) return
+        val queued = officialDeferredFeedQueueSize()
+        if (queued <= 0 || queued >= resumeHandoffCount) return
+        Log.trace {
+            "StoryAutoNext: drop deferred W2 queue size=$queued saved=$resumeHandoffCount " +
+                "(official w2 would F1-replace chain)"
+        }
+        clearOfficialDeferredFeedQueue()
+    }
+
+    /** Block W2 while I=false from queueing a shrink-replace batch into f208484w. */
+    private fun Any.shouldBlockDeferredW2Replace(incoming: List<*>): Boolean {
+        if (!isResumeHandoffArmed()) return false
+        if (isOfficialPagerActive()) return false
+        if (incoming.size >= resumeHandoffCount) return false
+        Log.trace {
+            "StoryAutoNext: block deferred W2 size=${incoming.size} saved=$resumeHandoffCount " +
+                "tag=${storyPagerTag()}"
+        }
+        return true
     }
 
     /** Identity of the video StoryPlayer is actually playing (not stale adapter index). */
@@ -2142,7 +2731,32 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
             return false
         }
         tailWaitKey = null
-        val nextIndex = current + 1
+        var nextIndex = current + 1
+        var skippedSkippable = 0
+        while (nextIndex < count && skippedSkippable < 8 && root.isUnsafeStoryIndex(nextIndex)) {
+            nextIndex++
+            skippedSkippable++
+        }
+        if (skippedSkippable > 0) {
+            Log.trace {
+                "StoryAutoNext: skipped $skippedSkippable ad/live card(s) before index=$nextIndex"
+            }
+        }
+        if (nextIndex >= count) {
+            val now = System.currentTimeMillis()
+            val key = "$current/$count"
+            val waitingSince = if (tailWaitKey == key) tailWaitStartAtMs else now
+            tailWaitKey = key
+            tailWaitStartAtMs = waitingSince
+            val forceLoad = now - waitingSince >= TAIL_FORCE_LOAD_MORE_MS
+            root.callOfficialStoryLoadMore(current, force = forceLoad)
+            if (forceLoad) {
+                root.callOfficialStoryPlayModeNext()
+                tailWaitStartAtMs = now
+            }
+            Log.trace { "StoryAutoNext: waiting official loadMore current=$current count=$count" }
+            return false
+        }
         // Only fetch when the next adapter slot does not exist yet (official tail behaviour).
         // Unconditional loadMore on every step was appending fresh API batches at the tail
         // while the engine walked indices 1,2,3… — mixing EFG with the original BCD chain.
