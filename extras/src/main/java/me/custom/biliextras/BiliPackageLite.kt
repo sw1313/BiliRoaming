@@ -72,40 +72,7 @@ class BiliPackageLite(
         findStoryPagerListMethod("addVideo", " add ")
     }
 
-    private val cachedInsertStoryCardsMethod by lazy {
-        findStoryPagerListMethod("insertStoryCards", " insert ")
-    }
-
-    private val cachedUpdateStoryListMethod by lazy {
-        val clazz = storyPagerPlayerClass ?: return@lazy null
-        withDexHelper { dexHelper ->
-            val listIndex = dexHelper.encodeClassIndex(List::class.java)
-            dexHelper.findMethodUsingString(
-                "updateList, start pos:",
-                false,
-                -1,
-                -1,
-                null,
-                dexHelper.encodeClassIndex(clazz),
-                null,
-                longArrayOf(dexHelper.encodeClassIndex(Int::class.javaPrimitiveType!!), listIndex),
-                null,
-                true,
-            ).asSequence().firstNotNullOfOrNull {
-                dexHelper.decodeMethodIndex(it) as? Method
-            }
-        }.onSuccess {
-            Log.d { "StoryPagerPlayer updateStoryList dex result: ${it?.name}" }
-        }.onFailure {
-            Log.e(it)
-        }.getOrNull()
-    }
-
     fun addVideoMethod(): Method? = cachedAddVideoMethod
-
-    fun insertStoryCardsMethod(): Method? = cachedInsertStoryCardsMethod
-
-    fun updateStoryListMethod(): Method? = cachedUpdateStoryListMethod
 
     data class PlayerCoreMethods(
         val serviceClass: Class<*>,

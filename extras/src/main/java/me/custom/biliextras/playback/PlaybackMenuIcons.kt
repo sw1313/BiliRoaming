@@ -18,5 +18,6 @@ object PlaybackMenuIcons {
     const val PREFS = "playsetting-line@500"
     const val ORIENTATION = "arrow-expand-fullscreen-double-line@500"
     const val UP = "person-user-line@500"
+    const val BLOCK_UP = "person-blacklist-line@500"
     const val TAG = "calendar-mark-line@500"
 }

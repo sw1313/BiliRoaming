@@ -74,10 +74,20 @@ object PlaybackMenuRows {
         context: Context,
         fullscreenInline: Boolean,
     ): List<Any> {
-        val count = 3
+        val count = 4
         var i = 0
         fun nextType() = factory.videoSettingTypeForIndex(i++, count)
         return listOf(
+            factory.createPlaybackActionRow(
+                title = "屏蔽当前UP",
+                icon = PlaybackMenuIcons.BLOCK_UP,
+                subtitle = "",
+                withArrow = false,
+                videoSettingType = nextType(),
+                actionId = PlaybackMenuActionHandler.BLOCK_STORY_CURRENT_UP,
+                context = context,
+                fullscreenInline = fullscreenInline,
+            ),
             factory.createPlaybackSwitchRow(
                 title = "后台自动连播",
                 icon = PlaybackMenuIcons.AUTO_NEXT,

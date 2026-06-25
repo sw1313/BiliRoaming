@@ -12,17 +12,23 @@ import android.preference.*
 import android.view.ViewGroup
 import android.widget.TextView
 import me.custom.biliextras.hook.StoryDiversionPrefs
+import me.custom.biliextras.hook.StoryUpBlockListDialog
+import me.custom.biliextras.hook.StoryUpBlockPrefs
+import me.custom.biliextras.hook.StoryUpCardApi
 import me.custom.biliextras.utils.addModuleAssets
 import me.custom.biliextras.utils.callMethodOrNull
 import me.custom.biliextras.utils.getObjectFieldOrNull
 import me.custom.biliextras.utils.hookMethod
 import me.custom.biliextras.utils.Log
 import me.custom.biliextras.utils.ePrefs
+import java.util.concurrent.Executors
 import kotlin.system.exitProcess
 
 class ExtrasSettingDialog(context: Context) : AlertDialog.Builder(context) {
     class PrefsFragment : PreferenceFragment(), Preference.OnPreferenceChangeListener,
         Preference.OnPreferenceClickListener {
+        private val summaryExecutor = Executors.newSingleThreadExecutor()
+
         @Deprecated("Deprecated in Java")
         override fun onCreate(savedInstanceState: Bundle?) {
             super.onCreate(savedInstanceState)
@@ -32,7 +38,8 @@ class ExtrasSettingDialog(context: Context) : AlertDialog.Builder(context) {
             listOf(
                 "block_up_share_goods",
                 "block_story_live",
-                "block_story_ad_dynamic",
+                "block_story_boost",
+                "block_story_up",
                 "hide_vip_center",
                 "block_charging_video",
                 "block_charging_video_log",
@@ -43,7 +50,14 @@ class ExtrasSettingDialog(context: Context) : AlertDialog.Builder(context) {
                 findPreference(it)?.onPreferenceChangeListener = this
             }
             findPreference("story_diversion_settings")?.onPreferenceClickListener = this
+            findPreference("story_block_up_list")?.onPreferenceClickListener = this
             updateStoryDiversionSummary()
+            refreshStoryBlockUpSummary()
+        }
+
+        override fun onDestroy() {
+            summaryExecutor.shutdownNow()
+            super.onDestroy()
         }
 
         override fun onPreferenceChange(preference: Preference?, newValue: Any?): Boolean {
@@ -51,6 +65,7 @@ class ExtrasSettingDialog(context: Context) : AlertDialog.Builder(context) {
             if (newValue is Boolean) {
                 ePrefs.edit().putBoolean(key, newValue).commit()
                 if (key == Log.KEY_VERBOSE) Log.refreshVerboseCache()
+                if (key == StoryUpBlockPrefs.KEY_ENABLED) refreshStoryBlockUpSummary()
             }
             return true
         }
@@ -59,6 +74,10 @@ class ExtrasSettingDialog(context: Context) : AlertDialog.Builder(context) {
             return when (preference?.key) {
                 "story_diversion_settings" -> {
                     showStoryDiversionSettings()
+                    true
+                }
+                "story_block_up_list" -> {
+                    showStoryBlockUpEditor()
                     true
                 }
                 else -> false
@@ -92,6 +111,32 @@ class ExtrasSettingDialog(context: Context) : AlertDialog.Builder(context) {
                     updateStoryDiversionSummary()
                 }
                 .show()
+        }
+
+        private fun refreshStoryBlockUpSummary() {
+            val pref = findPreference("story_block_up_list") ?: return
+            if (!StoryUpBlockPrefs.enabled()) {
+                pref.summary = "功能已关闭"
+                return
+            }
+            val mids = StoryUpBlockPrefs.orderedBlockedMids()
+            if (mids.isEmpty()) {
+                pref.summary = "未屏蔽任何 UP，点击管理"
+                return
+            }
+            pref.summary = "已屏蔽 ${mids.size} 个 UP，点击管理"
+            summaryExecutor.execute {
+                StoryUpCardApi.prefetchNames(mids)
+                val summary = StoryUpBlockPrefs.displaySummary()
+                activity?.runOnUiThread { pref.summary = summary }
+            }
+        }
+
+        private fun showStoryBlockUpEditor() {
+            val context = activity ?: return
+            StoryUpBlockListDialog.show(context) {
+                refreshStoryBlockUpSummary()
+            }
         }
     }
 

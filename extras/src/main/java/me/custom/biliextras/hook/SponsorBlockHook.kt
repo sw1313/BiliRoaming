@@ -157,10 +157,7 @@ class SponsorBlockHook(classLoader: ClassLoader) : BaseHook(classLoader) {
             req?.let(::updateFromPlayViewReq)
             val result = chain.proceed()
             updateFromPlayViewReply(req, result)
-            handler.post {
-                adoptStoryPlayerCore()
-                checkAndSkip()
-            }
+            handler.post { onPlayViewUniteCompleted() }
             result
         }
         if (unaryHandles.isNotEmpty()) {
@@ -178,10 +175,7 @@ class SponsorBlockHook(classLoader: ClassLoader) : BaseHook(classLoader) {
                         reply ?: return@mossResponseHandlerReplaceProxy null
                         updateFromPlayViewReply(req, reply)
                         ensurePlayerCoreHooked()
-                        handler.post {
-                            adoptStoryPlayerCore()
-                            checkAndSkip()
-                        }
+                        handler.post { onPlayViewUniteCompleted() }
                         null
                     }
                 }
@@ -254,12 +248,67 @@ class SponsorBlockHook(classLoader: ClassLoader) : BaseHook(classLoader) {
         }?.apply { isAccessible = true }?.getInt(this)
     }.getOrNull()
 
-    private fun isVisibleOuterTabStoryPager(player: Any): Boolean {
-        val tabPlayer = when (StoryBackgroundAutoNextHook.visibleOuterTabIndex) {
+    private fun visibleStoryPagerPlayer(): Any? =
+        when (StoryBackgroundAutoNextHook.visibleOuterTabIndex) {
             1 -> StoryBackgroundAutoNextHook.upSpaceStoryPlayer
             else -> StoryBackgroundAutoNextHook.mainFeedStoryPlayer
         } ?: StoryBackgroundAutoNextHook.activeStoryPlayer
+
+    private fun isVisibleOuterTabStoryPager(player: Any): Boolean {
+        val tabPlayer = visibleStoryPagerPlayer() ?: return false
         return player === tabPlayer
+    }
+
+    /**
+     * Vertical Story pager owns SponsorBlock (F1/x2/w2). [StoryBackgroundAutoNextHook.hasActiveStory]
+     * stays true after opening UGC detail (UnitedBizDetailsActivity) — must not use that alone.
+     */
+    private fun isStorySponsorBlockAuthority(): Boolean {
+        if (!StoryBackgroundAutoNextHook.hasActiveStory()) return false
+        val hook = StoryBackgroundAutoNextHook
+        if (hook.activityPaused && !hook.isInBackground) return false
+        val pager = visibleStoryPagerPlayer() ?: return false
+        if (!isVisibleOuterTabStoryPager(pager)) return false
+        return pager.isOfficialStoryPagerActive() || hook.isInBackground
+    }
+
+    private fun onPlayViewUniteCompleted() {
+        if (isStorySponsorBlockAuthority()) {
+            adoptStoryPlayerCore()
+        } else {
+            checkAndSkip()
+        }
+    }
+
+    /** StoryPagerPlayer.F1 item → bvid/cid; authoritative for on-screen video in story mode. */
+    private fun storyF1VideoKey(pager: Any? = visibleStoryPagerPlayer()): VideoKey? {
+        val item = pager?.callMethodOrNull("F1") ?: return null
+        val bvid = firstValidBvid(
+            item.callMethodOrNullAs<String?>("getBvid"),
+            item.callMethodOrNullAs<String?>("getBvId"),
+        ) ?: item.callMethodOrNullAs<Long?>("getAid")?.takeIf { it > 0 }?.let(::av2bv)
+        if (bvid.isNullOrBlank() || !bvid.startsWith("BV")) return null
+        val cid = item.callMethodOrNullAs<Long?>("getCid") ?: 0L
+        if (cid <= 0L) return null
+        return VideoKey(bvid, cid)
+    }
+
+    private fun acceptStoryVideoBinding(video: VideoKey): Boolean {
+        if (!isStorySponsorBlockAuthority()) return true
+        val f1 = storyF1VideoKey() ?: return true
+        return f1.sameVideo(video)
+    }
+
+    private fun ensureStorySegmentBinding(): Boolean {
+        if (!isStorySponsorBlockAuthority()) return true
+        val bound = currentVideo ?: return false
+        val f1 = storyF1VideoKey() ?: return true
+        if (bound.sameVideo(f1)) return true
+        Log.trace {
+            "SponsorBlock: story F1 mismatch bound=${bound.bvid}/${bound.cid} f1=${f1.bvid}/${f1.cid}, rebind"
+        }
+        rebindStorySegmentsFromPager(visibleStoryPagerPlayer(), requireActiveQ = false)
+        return false
     }
 
     private fun shouldBindStorySegmentsFromPager(player: Any, requireActiveQ: Boolean = true): Boolean {
@@ -283,7 +332,9 @@ class SponsorBlockHook(classLoader: ClassLoader) : BaseHook(classLoader) {
         } else {
             clearStaleProgressState(bvid, cid)
         }
-        adoptStoryPlayerCore(storyPagerPlayer)
+        if (isStorySponsorBlockAuthority()) {
+            adoptStoryPlayerCore(storyPagerPlayer)
+        }
     }
 
     /**
@@ -310,6 +361,7 @@ class SponsorBlockHook(classLoader: ClassLoader) : BaseHook(classLoader) {
         val serviceClass = instance.playerCoreMethods?.serviceClass ?: return false
         val candidates = buildList {
             preferredStoryPager?.let { add(it) }
+            visibleStoryPagerPlayer()?.let { add(it) }
             StoryBackgroundAutoNextHook.activeStoryPlayer?.let { add(it) }
             StoryBackgroundAutoNextHook.mainFeedStoryPlayer?.let { add(it) }
             StoryBackgroundAutoNextHook.upSpaceStoryPlayer?.let { add(it) }
@@ -389,7 +441,9 @@ class SponsorBlockHook(classLoader: ClassLoader) : BaseHook(classLoader) {
     private fun hookPlayerCoreLazyCapture(methods: me.custom.biliextras.BiliPackageLite.PlayerCoreMethods) {
         val serviceClass = methods.serviceClass
         val captureHook: (Any) -> Unit = { service ->
-            if (playerCoreService == null) {
+            val adopt = playerCoreService == null ||
+                (!isStorySponsorBlockAuthority() && playerCoreService !== service)
+            if (adopt) {
                 Log.trace { "SponsorBlock: lazy-captured player core ${service.javaClass.name}#" +
                         System.identityHashCode(service) }
                 updatePlayerService(service, checkNow = true)
@@ -515,6 +569,7 @@ class SponsorBlockHook(classLoader: ClassLoader) : BaseHook(classLoader) {
     }
 
     private fun updateFromViewReply(reply: Any) {
+        if (isStorySponsorBlockAuthority()) return
         val arc = reply.callMethodOrNull("getArc")
         val bvid = firstValidBvid(
             arc?.callMethodOrNullAs<String?>("getBvid"),
@@ -534,6 +589,7 @@ class SponsorBlockHook(classLoader: ClassLoader) : BaseHook(classLoader) {
 
     private fun updateFromViewReq(req: Any?) {
         req ?: return
+        if (isStorySponsorBlockAuthority()) return
         val bvid = firstValidBvid(
             req.callMethodOrNullAs<String?>("getBvid"),
             req.callMethodOrNullAs<String?>("getBvId"),
@@ -585,7 +641,7 @@ class SponsorBlockHook(classLoader: ClassLoader) : BaseHook(classLoader) {
             }
             return
         }
-        if (StoryBackgroundAutoNextHook.hasActiveStory()) {
+        if (isStorySponsorBlockAuthority()) {
             // Story: segments follow F1/x2, not neighbour prefetch playView (jadx F1 = Z0(D1)).
             return
         }
@@ -633,7 +689,7 @@ class SponsorBlockHook(classLoader: ClassLoader) : BaseHook(classLoader) {
             ?: reqVod?.callMethodOrNullAs<Long?>("getAid")?.takeIf { it > 0 }?.let(::av2bv)
             ?: pendingBvid
         if (!bvid.isNullOrBlank() && bvid.startsWith("BV")) {
-            if (StoryBackgroundAutoNextHook.hasActiveStory()) {
+            if (isStorySponsorBlockAuthority()) {
                 ensurePlayerCoreHooked()
                 handler.post { adoptStoryPlayerCore() }
                 return
@@ -651,6 +707,12 @@ class SponsorBlockHook(classLoader: ClassLoader) : BaseHook(classLoader) {
 
 
     private fun updateVideo(video: VideoKey) {
+        if (!acceptStoryVideoBinding(video)) {
+            Log.trace {
+                "SponsorBlock: drop updateVideo ${video.bvid}/${video.cid} (story F1 mismatch)"
+            }
+            return
+        }
         val current = currentVideo
         if (current?.bvid == video.bvid && current.cid == video.cid) {
             if (video.durationMs > current.durationMs) {
@@ -771,6 +833,7 @@ class SponsorBlockHook(classLoader: ClassLoader) : BaseHook(classLoader) {
 
     private fun checkAndSkip(positionMs: Long, durationMs: Long?) {
         if (!SponsorBlockPrefs.enabled) return
+        if (!ensureStorySegmentBinding()) return
         prepareSkipStateForPosition(positionMs)
         if (currentSegments.isNotEmpty()) {
             SponsorBlockState.updatePlaybackPosition(positionMs)

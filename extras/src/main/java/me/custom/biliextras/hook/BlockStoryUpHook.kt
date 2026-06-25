@@ -4,29 +4,27 @@ import me.custom.biliextras.BiliPackageLite.Companion.instance
 import me.custom.biliextras.utils.*
 
 /**
- * Blocks story live cards on the same ingress as roaming [StoryPlayerAdHook] (addVideo / h1).
- * Also filters W2 bulk-reload batches — bg handoff snapshot restore can bypass a one-shot h1 filter.
+ * Blocks Story feed items from blocked UPs on addVideo (h1) and W2 bulk reload,
+ * same ingress as [BlockStoryLiveHook].
  */
-class BlockStoryLiveHook(classLoader: ClassLoader) : BaseHook(classLoader) {
+class BlockStoryUpHook(classLoader: ClassLoader) : BaseHook(classLoader) {
     override fun startHook() {
-        if (!StoryLiveFilter.enabled()) return
-
         val playerClass = instance.storyPagerPlayerClass ?: return
         val methodName = instance.addVideoMethod()?.name ?: run {
-            Log.w { "BlockStoryLive: addVideo method not found" }
+            Log.w { "BlockStoryUp: addVideo method not found" }
             return
         }
         playerClass.hookMethod(methodName, List::class.java) { chain ->
-            StoryLiveFilter.filterMutableList(chain.args[0] as? MutableList<Any?>)
+            StoryUpFilter.filterMutableList(chain.args[0] as? MutableList<Any?>)
             chain.proceed()
         }
         playerClass.declaredMethods.firstOrNull {
             it.name == "W2" && it.parameterCount == 3 &&
                 it.parameterTypes[0] == List::class.java
         }?.hookMethod { chain ->
-            StoryLiveFilter.filterMutableList(chain.args[0] as? MutableList<Any?>)
+            StoryUpFilter.filterMutableList(chain.args[0] as? MutableList<Any?>)
             chain.proceed()
         }
-        Log.s("startHook: BlockStoryLive on ${playerClass.name}#$methodName (+W2)")
+        Log.s("startHook: BlockStoryUp on ${playerClass.name}#$methodName (+W2)")
     }
 }

@@ -22,6 +22,7 @@ public final class PlaybackMenuActionHandler implements InvocationHandler {
     public static final int TOGGLE_STORY_BACKGROUND = 107;
     public static final int TOGGLE_MEDIA_BUTTON = 108;
     public static final int TOGGLE_DISABLE_CHAPTER = 109;
+    public static final int BLOCK_STORY_CURRENT_UP = 110;
 
     private final int actionId;
     private final Context context;
@@ -113,6 +114,9 @@ public final class PlaybackMenuActionHandler implements InvocationHandler {
                 break;
             case TOGGLE_DISABLE_CHAPTER:
                 PlaybackMenuActions.toggleDisableChapterProgress(toggleFlow);
+                break;
+            case BLOCK_STORY_CURRENT_UP:
+                PlaybackMenuActions.blockCurrentStoryUp(context);
                 break;
             default:
                 break;

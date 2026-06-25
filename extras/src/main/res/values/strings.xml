@@ -16,9 +16,16 @@
     <string name="block_up_share_goods_title">屏蔽 UP 主分享好物</string>
     <string name="block_up_share_goods_summary">屏蔽普通视频半屏详情页标签下方的「UP 主分享好物」模块</string>
     <string name="block_story_live_title">屏蔽竖屏模式直播</string>
-    <string name="block_story_live_summary">屏蔽 Story 竖屏流中的直播卡片（含首批 add、中途 insert、AdStory 重排三条入口）</string>
-    <string name="block_story_ad_dynamic_title">屏蔽竖屏动态插入广告</string>
-    <string name="block_story_ad_dynamic_summary">屏蔽刷竖屏过程中中途插入、AdStory 重排（re-rank）替换的广告卡。首批列表广告请用哔哩漫游「净化竖屏广告/推广」</string>
+    <string name="block_story_live_summary">屏蔽竖屏首批 feed 中的直播卡片（与漫游「净化竖屏广告/推广」相同，仅 hook addVideo）</string>
+
+    <string name="block_story_boost_title">屏蔽竖屏推广视频</string>
+    <string name="block_story_boost_summary">屏蔽播放数旁带闪电/火箭图标的推广视频（服务端 is_vt 标记，外观仍像普通 UGC）</string>
+
+    <string name="block_story_up_title">屏蔽竖屏指定 UP</string>
+    <string name="block_story_up_summary">竖屏流过滤列表中的 UP 主视频；默认屏蔽夸克（405724215）。匹配以 UID 为准，昵称仅用于展示且会联网查询最新名称</string>
+    <string name="story_block_up_list_title">竖屏屏蔽 UP 列表</string>
+    <string name="story_block_up_list_summary">每行一个 UP，可添加或删除；展示为「昵称 (UID)」</string>
+
     <string name="story_diversion_settings_title">屏蔽竖屏导流入口选项</string>
     <string name="story_diversion_settings_summary">分项屏蔽竖屏流的导流入口与浮层：左下角标签、番剧上方大会员条、直播预约、非 WiFi 流量卡推广、购物车与广告浮层等，按需勾选</string>
     <string name="story_background_auto_next_title">后台自动连播</string>

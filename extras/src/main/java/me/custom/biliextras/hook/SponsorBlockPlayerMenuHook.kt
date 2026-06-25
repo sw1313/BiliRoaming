@@ -22,6 +22,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 class SponsorBlockPlayerMenuHook(classLoader: ClassLoader) : BaseHook(classLoader) {
     private val uiFactory by lazy { SponsorBlockMenuUiFactory.forClassLoader(classLoader) }
     private val settingListLocal = ThreadLocal<MutableList<Any>>()
+    private val storyMenuInjectedThisBuild = ThreadLocal<Boolean>()
     private val fabShown = AtomicBoolean(false)
 
     private companion object {
@@ -81,6 +82,7 @@ class SponsorBlockPlayerMenuHook(classLoader: ClassLoader) : BaseHook(classLoade
         val cardInfoClass = "com.bilibili.video.story.setting.a".from(mClassLoader) ?: return
         hookSettingListScope(
             "com.bilibili.video.story.setting.StoryMenuService\$createSettingGroup\$2",
+            injectStoryMenuAfterGroup = true,
         )
         storyMenuClass.hookMethod(
             "m0",
@@ -95,10 +97,13 @@ class SponsorBlockPlayerMenuHook(classLoader: ClassLoader) : BaseHook(classLoade
             }
             chain.proceed()
         }
-        Log.s("SponsorBlockPlayerMenu: hooked StoryMenuService.m0(autoScroll)")
+        Log.s("SponsorBlockPlayerMenu: hooked StoryMenuService.m0 + createSettingGroup fallback")
     }
 
-    private fun hookSettingListScope(createGroupClassName: String) {
+    private fun hookSettingListScope(
+        createGroupClassName: String,
+        injectStoryMenuAfterGroup: Boolean = false,
+    ) {
         val createGroupClass = createGroupClassName.from(mClassLoader) ?: run {
             Log.w { "SponsorBlockPlayerMenu: missing $createGroupClassName" }
             return
@@ -106,10 +111,15 @@ class SponsorBlockPlayerMenuHook(classLoader: ClassLoader) : BaseHook(classLoade
         val hooked = hookInvokeSuspend(createGroupClass) { chain ->
             val list = extractSettingList(chain.thisObject)
             if (list != null) settingListLocal.set(list)
+            if (injectStoryMenuAfterGroup) storyMenuInjectedThisBuild.set(false)
             try {
                 chain.proceed()
             } finally {
+                if (injectStoryMenuAfterGroup) {
+                    injectStoryMenuIfAbsent(chain.thisObject)
+                }
                 settingListLocal.remove()
+                if (injectStoryMenuAfterGroup) storyMenuInjectedThisBuild.remove()
             }
         }
         if (hooked) {
@@ -135,6 +145,7 @@ class SponsorBlockPlayerMenuHook(classLoader: ClassLoader) : BaseHook(classLoade
     }
 
     private fun injectMainEntry(menuHost: Any, videoSettingType: Any?, kind: PlayerMenuKind) {
+        if (kind == PlayerMenuKind.STORY && storyMenuInjectedThisBuild.get() == true) return
         val list = settingListLocal.get() ?: run {
             Log.w { "SponsorBlockPlayerMenu: inject skipped, \$list ThreadLocal empty" }
             return
@@ -149,9 +160,29 @@ class SponsorBlockPlayerMenuHook(classLoader: ClassLoader) : BaseHook(classLoade
         uiFactory.createMainEntryRow(context, settingType)?.let {
             list.add(index, it)
             PlaybackMenuRows.injectAfterSponsorBlock(uiFactory, list, context, kind, index + 1)
+            if (kind == PlayerMenuKind.STORY) storyMenuInjectedThisBuild.set(true)
             Log.trace { "SponsorBlockPlayerMenu: injected main + playback entries at index=$index kind=$kind" }
         } ?: Log.w { "SponsorBlockPlayerMenu: inject failed, row creation returned null" }
     }
+
+    /**
+     * Official hides auto-scroll when StoryPlayer.P1() (temporary play mode) is active.
+     * Inject after the setting group is built so extras rows survive that filter.
+     */
+    private fun injectStoryMenuIfAbsent(coroutine: Any) {
+        if (storyMenuInjectedThisBuild.get() == true) return
+        val menuHost = extractOuterInstance(coroutine, "this\$0") ?: run {
+            Log.w { "SponsorBlockPlayerMenu: story inject skipped, StoryMenuService missing" }
+            return
+        }
+        SponsorBlockMenuHost.clearFullscreenWidget()
+        injectMainEntry(menuHost, uiFactory.middleVideoSettingType(), PlayerMenuKind.STORY)
+    }
+
+    private fun extractOuterInstance(coroutine: Any, fieldName: String): Any? =
+        coroutine.javaClass.declaredFields.firstOrNull { it.name == fieldName }
+            ?.apply { isAccessible = true }
+            ?.get(coroutine)
 
     private fun prependMainEntry(
         rows: MutableList<Any>,

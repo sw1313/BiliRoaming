@@ -28,6 +28,14 @@ class StoryPlayerAdHook(classLoader: ClassLoader) : BaseHook(classLoader) {
                     isAdMethod.isAccessible = true
 
                     val isAd = isAdMethod.invoke(it) as? Boolean
+                    val isCommercialAd = "ad" in purifyTags && runCatching {
+                        storyDetail.getDeclaredMethod("isAdHardAndFly").apply { isAccessible = true }.invoke(it) == true ||
+                            storyDetail.getDeclaredMethod("isAdImage").apply { isAccessible = true }.invoke(it) == true ||
+                            storyDetail.getDeclaredMethod("isAdLive").apply { isAccessible = true }.invoke(it) == true ||
+                            storyDetail.getDeclaredMethod("isNaturalAd").apply { isAccessible = true }.invoke(it) == true ||
+                            (storyDetail.getDeclaredMethod("getGoto").apply { isAccessible = true }.invoke(it) as? String)
+                                ?.startsWith("vertical_ad") == true
+                    }.getOrDefault(false)
 
                     var cartInfoText: String? = null
                     val cartIconInfo = getCartIconInfoMethod.invoke(it)
@@ -39,6 +47,7 @@ class StoryPlayerAdHook(classLoader: ClassLoader) : BaseHook(classLoader) {
                     }
 
                     val shouldRemove = when {
+                        isCommercialAd -> true
                         "ad" in purifyTags && isAd == true -> true
                         "short" in purifyTags && cartInfoText == "短剧" -> true
                         "shopping" in purifyTags && cartInfoText == "购物" -> true
