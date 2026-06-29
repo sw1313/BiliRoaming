@@ -33,7 +33,7 @@ object StoryUpBlockPrefs {
         val mids = parseInputLines(text)
         val normalized = mids.joinToString("\n")
         ePrefs.edit().putString(KEY_MIDS, normalized).commit()
-        StoryUpCardApi.prefetchNames(mids)
+        StoryUpCardApi.prefetchNamesAsync(mids)
     }
 
     fun addMid(mid: Long) {

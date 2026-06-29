@@ -25,6 +25,15 @@ object StoryUpFilter {
         }
     }
 
+    fun filteredCopyIfChanged(list: List<Any?>?): ArrayList<Any?>? {
+        if (!enabled() || list == null) return null
+        val filtered = list.filterNot { item -> item != null && isBlockedUp(item) }
+        val removed = list.size - filtered.size
+        if (removed <= 0) return null
+        Log.trace { "StoryUpFilter: removed $removed blocked UP item(s)" }
+        return ArrayList(filtered)
+    }
+
     fun isBlockedUp(item: Any): Boolean {
         val mid = ownerMid(item) ?: return false
         return StoryUpBlockPrefs.isBlocked(mid)

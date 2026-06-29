@@ -9,22 +9,28 @@ import me.custom.biliextras.utils.*
  */
 class BlockStoryLiveHook(classLoader: ClassLoader) : BaseHook(classLoader) {
     override fun startHook() {
-        if (!StoryLiveFilter.enabled()) return
-
         val playerClass = instance.storyPagerPlayerClass ?: return
         val methodName = instance.addVideoMethod()?.name ?: run {
             Log.w { "BlockStoryLive: addVideo method not found" }
             return
         }
         playerClass.hookMethod(methodName, List::class.java) { chain ->
-            StoryLiveFilter.filterMutableList(chain.args[0] as? MutableList<Any?>)
+            StoryLiveFilter.filteredCopyIfChanged(chain.args[0] as? List<Any?>)?.let {
+                val args = chain.args.toTypedArray()
+                args[0] = it
+                return@hookMethod chain.proceed(args)
+            }
             chain.proceed()
         }
         playerClass.declaredMethods.firstOrNull {
             it.name == "W2" && it.parameterCount == 3 &&
                 it.parameterTypes[0] == List::class.java
         }?.hookMethod { chain ->
-            StoryLiveFilter.filterMutableList(chain.args[0] as? MutableList<Any?>)
+            StoryLiveFilter.filteredCopyIfChanged(chain.args[0] as? List<Any?>)?.let {
+                val args = chain.args.toTypedArray()
+                args[0] = it
+                return@hookMethod chain.proceed(args)
+            }
             chain.proceed()
         }
         Log.s("startHook: BlockStoryLive on ${playerClass.name}#$methodName (+W2)")

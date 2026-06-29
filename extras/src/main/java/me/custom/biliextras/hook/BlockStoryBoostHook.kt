@@ -15,14 +15,22 @@ class BlockStoryBoostHook(classLoader: ClassLoader) : BaseHook(classLoader) {
             return
         }
         playerClass.hookMethod(methodName, List::class.java) { chain ->
-            StoryBoostFilter.filterMutableList(chain.args[0] as? MutableList<Any?>)
+            StoryBoostFilter.filteredCopyIfChanged(chain.args[0] as? List<Any?>)?.let {
+                val args = chain.args.toTypedArray()
+                args[0] = it
+                return@hookMethod chain.proceed(args)
+            }
             chain.proceed()
         }
         playerClass.declaredMethods.firstOrNull {
             it.name == "W2" && it.parameterCount == 3 &&
                 it.parameterTypes[0] == List::class.java
         }?.hookMethod { chain ->
-            StoryBoostFilter.filterMutableList(chain.args[0] as? MutableList<Any?>)
+            StoryBoostFilter.filteredCopyIfChanged(chain.args[0] as? List<Any?>)?.let {
+                val args = chain.args.toTypedArray()
+                args[0] = it
+                return@hookMethod chain.proceed(args)
+            }
             chain.proceed()
         }
         Log.s("startHook: BlockStoryBoost on ${playerClass.name}#$methodName (+W2)")

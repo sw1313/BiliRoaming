@@ -36,6 +36,15 @@ object StoryLiveFilter {
         }
     }
 
+    fun filteredCopyIfChanged(list: List<Any?>?): ArrayList<Any?>? {
+        if (!enabled() || list == null) return null
+        val filtered = list.filterNot { item -> item != null && isStoryLive(item) }
+        val removed = list.size - filtered.size
+        if (removed <= 0) return null
+        Log.trace { "StoryLiveFilter: removed $removed live item(s)" }
+        return ArrayList(filtered)
+    }
+
     fun isStoryLive(item: Any): Boolean {
         val storyDetail = item.javaClass
         val methods = storyDetailMethodCache.getOrPut(storyDetail) {

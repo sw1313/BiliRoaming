@@ -151,6 +151,7 @@ object StoryUpBlockListDialog {
                 }
                 ioExecutor.execute {
                     val mid = StoryUpBlockPrefs.resolveInput(input)
+                    val label = mid?.let { StoryUpCardApi.formatDisplayBlocking(it) }
                     mainHandler.post {
                         if (mid == null) {
                             Log.toast("无法解析：$input")
@@ -158,13 +159,12 @@ object StoryUpBlockListDialog {
                             return@post
                         }
                         if (StoryUpBlockPrefs.containsMid(mid)) {
-                            Log.toast("已在列表：${StoryUpCardApi.formatDisplay(mid)}")
+                            Log.toast("已在列表：${label ?: mid}")
                             onDone(false)
                             return@post
                         }
                         StoryUpBlockPrefs.addMid(mid)
-                        StoryUpCardApi.fetchNameByMid(mid)
-                        Log.toast("已添加 ${StoryUpCardApi.formatDisplay(mid)}")
+                        Log.toast("已添加 ${label ?: mid}")
                         onDone(true)
                     }
                 }

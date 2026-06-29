@@ -31,6 +31,15 @@ object StoryBoostFilter {
         }
     }
 
+    fun filteredCopyIfChanged(list: List<Any?>?): ArrayList<Any?>? {
+        if (!enabled() || list == null) return null
+        val filtered = list.filterNot { item -> item != null && isBoostMarked(item) }
+        val removed = list.size - filtered.size
+        if (removed <= 0) return null
+        Log.trace { "StoryBoostFilter: removed $removed boost-marked item(s)" }
+        return ArrayList(filtered)
+    }
+
     fun isBoostMarked(item: Any): Boolean {
         if (!enabled()) return false
         return invokeBool(storyMethods(item).isVt, item) == true

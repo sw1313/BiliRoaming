@@ -16,7 +16,7 @@
     <string name="block_up_share_goods_title">屏蔽 UP 主分享好物</string>
     <string name="block_up_share_goods_summary">屏蔽普通视频半屏详情页标签下方的「UP 主分享好物」模块</string>
     <string name="block_story_live_title">屏蔽竖屏模式直播</string>
-    <string name="block_story_live_summary">屏蔽竖屏首批 feed 中的直播卡片（与漫游「净化竖屏广告/推广」相同，仅 hook addVideo）</string>
+    <string name="block_story_live_summary">屏蔽竖屏 feed 与批量刷新中的直播卡片（hook addVideo / W2）</string>
 
     <string name="block_story_boost_title">屏蔽竖屏推广视频</string>
     <string name="block_story_boost_summary">屏蔽播放数旁带闪电/火箭图标的推广视频（服务端 is_vt 标记，外观仍像普通 UGC）</string>

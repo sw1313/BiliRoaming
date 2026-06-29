@@ -539,15 +539,24 @@ class SponsorBlockHook(classLoader: ClassLoader) : BaseHook(classLoader) {
             return
         }
         val observerClass = registerMethod.parameterTypes[0]
-        val observer = Proxy.newProxyInstance(mClassLoader, arrayOf(observerClass)) { _, method, args ->
-            if (method.name == "onPlayerProgressChange" && args?.size == 2) {
-                val positionMs = (args[0] as? Number)?.toLong()
-                val durationMs = (args[1] as? Number)?.toLong()
-                if (positionMs != null && durationMs != null) {
-                    checkAndSkip(positionMs, durationMs)
+        val observer = Proxy.newProxyInstance(mClassLoader, arrayOf(observerClass)) { proxy, method, args ->
+            when (method.name) {
+                "equals" -> proxy === args?.firstOrNull()
+                "hashCode" -> System.identityHashCode(proxy)
+                "toString" -> "BiliExtrasSponsorBlockProgressObserver@" +
+                    System.identityHashCode(proxy).toString(16)
+                "onPlayerProgressChange" -> {
+                    if (args?.size == 2) {
+                        val positionMs = (args[0] as? Number)?.toLong()
+                        val durationMs = (args[1] as? Number)?.toLong()
+                        if (positionMs != null && durationMs != null) {
+                            checkAndSkip(positionMs, durationMs)
+                        }
+                    }
+                    null
                 }
+                else -> null
             }
-            null
         }
         runCatching {
             registerMethod.invoke(service, observer)

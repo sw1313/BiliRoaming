@@ -7,6 +7,7 @@ import java.net.URL
 import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.Executors
 
 /** Query UP display name by mid; used for settings summary and confirm dialogs (mid is authoritative). */
 object StoryUpCardApi {
@@ -18,10 +19,18 @@ object StoryUpCardApi {
     private const val REFERER = "https://www.bilibili.com"
 
     private val nameCache = ConcurrentHashMap<Long, String>()
+    private val ioExecutor = Executors.newSingleThreadExecutor()
 
     fun cachedName(mid: Long): String? = nameCache[mid]
 
+    /** Main-thread safe: uses cache only; callers should prefetch on a worker when they need names. */
     fun formatDisplay(mid: Long): String {
+        val name = cachedName(mid)
+        return if (name.isNullOrBlank()) mid.toString() else "$name ($mid)"
+    }
+
+    /** Worker-thread helper for places that intentionally need an immediate network-backed label. */
+    fun formatDisplayBlocking(mid: Long): String {
         val name = cachedName(mid) ?: fetchNameByMid(mid)
         return if (name.isNullOrBlank()) mid.toString() else "$name ($mid)"
     }
@@ -74,6 +83,12 @@ object StoryUpCardApi {
         mids.forEach { mid ->
             if (nameCache[mid] == null) fetchNameByMid(mid)
         }
+    }
+
+    fun prefetchNamesAsync(mids: Collection<Long>) {
+        val pending = mids.filter { nameCache[it] == null }
+        if (pending.isEmpty()) return
+        ioExecutor.execute { prefetchNames(pending) }
     }
 
     private fun httpGet(url: String): String? = runCatching {

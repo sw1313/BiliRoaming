@@ -98,7 +98,7 @@ object PlaybackMenuActions {
     @JvmStatic
     fun blockCurrentStoryUp(context: Context) {
         SponsorBlockMenuHost.hidePlayerSettingWidgetIfNeeded()
-        val player = StoryBackgroundAutoNextHook.activeStoryPlayer
+        val player = StoryBackgroundAutoNextHook.currentVisibleStoryPlayer()
         if (player == null) {
             Log.toast("无法获取当前竖屏视频")
             return
