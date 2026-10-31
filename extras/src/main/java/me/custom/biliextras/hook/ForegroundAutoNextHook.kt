@@ -631,6 +631,67 @@ class ForegroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoader) {
             openNextRelateFeed(classLoader, service, ctx, generation, avid)
         }
 
+        fun openNextFromMediaButton(classLoader: ClassLoader, service: Any) {
+            cancelFallback()
+            activating = false
+            clearPendingCompletion()
+            val generation = ++openGeneration
+            trackService(service)
+            val ctx = UgcBackgroundPlayReflection.context(service) as? Context
+            if (ctx == null) {
+                Log.trace { "ForegroundAutoNext: media next no context" }
+                return
+            }
+            if (ForegroundAutoNextPrefs.hasActiveVideoPickPrefs()) {
+                openNextRelate(classLoader, service, generation)
+                return
+            }
+            val repo = UgcBackgroundPlayReflection.repo(service)
+            val currentAvid = getCurrentAvid(service)
+            if (repo == null || currentAvid == null || currentAvid <= 0L) {
+                Log.trace { "ForegroundAutoNext: media next missing repo/current avid" }
+                return
+            }
+            val fullscreen = isInFullscreen(service)
+            netExecutor.execute {
+                val candidate = runCatching {
+                    requestContinuousPlayCandidates(classLoader, repo, service)
+                        .firstOrNull { !BlockChargingVideoHook.shouldBlockAvid(it.avid) }
+                }.onFailure {
+                    Log.trace { "ForegroundAutoNext: media ContinuousPlay failed: ${it.message}" }
+                }.getOrNull()
+                mainHandler.post {
+                    if (generation != openGeneration) {
+                        Log.trace { "ForegroundAutoNext: stale media next, cancelled" }
+                        return@post
+                    }
+                    if (!isEligibleForForegroundAutoNext(service)) {
+                        Log.trace { "ForegroundAutoNext: media next skipped, not eligible" }
+                        return@post
+                    }
+                    if (candidate != null) {
+                        runCatching {
+                            if (!candidate.uri.isNullOrBlank()) {
+                                openUri(ctx, candidate.uri, fullscreen)
+                                finishSourceActivity(ctx)
+                            } else {
+                                openRelatePage(ctx, candidate.avid, fullscreen)
+                            }
+                            Log.trace {
+                                "ForegroundAutoNext: media next ContinuousPlay avid=${candidate.avid}"
+                            }
+                        }.onFailure {
+                            Log.trace { "ForegroundAutoNext: media next open failed: ${it.message}" }
+                            openNextRelateFeed(classLoader, service, ctx, generation, currentAvid)
+                        }
+                    } else {
+                        Log.trace { "ForegroundAutoNext: media next ContinuousPlay empty, trying relate feed" }
+                        openNextRelateFeed(classLoader, service, ctx, generation, currentAvid)
+                    }
+                }
+            }
+        }
+
         /** Official relate-feed URI fallback — also used when preference filters match nothing. */
         private fun openNextRelateFeed(
             classLoader: ClassLoader,

@@ -137,8 +137,8 @@ class MediaButtonControlHook(classLoader: ClassLoader) : BaseHook(classLoader) {
                 return@hookMethod chain.proceed()
             }
 
-            Log.trace { "MediaButton: normal foreground next -> open related video" }
-            ForegroundAutoNextHook.openNextRelate(mClassLoader, service)
+            Log.trace { "MediaButton: normal foreground next -> request ContinuousPlay" }
+            ForegroundAutoNextHook.openNextFromMediaButton(mClassLoader, service)
             null
         }
         Log.s("MediaButton: hooked ${innerClass.name}.switchToNext()")

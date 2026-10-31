@@ -88,7 +88,8 @@ class SponsorBlockProgressHook(classLoader: ClassLoader) : BaseHook(classLoader)
 
     private fun hookSeekBarAttachTracking() {
         SeekBar::class.java.hookMethod("onAttachedToWindow") { chain ->
-            val seekBar = chain.thisObject as SeekBar
+            // This method is inherited from ProgressBar; its hook also sees non-seek bars.
+            val seekBar = chain.thisObject as? SeekBar ?: return@hookMethod chain.proceed()
             if (videoSeekMarkers.any { seekBar.javaClass.name.contains(it) }) {
                 trackedSeekBars.add(seekBar)
             }

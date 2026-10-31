@@ -15,6 +15,7 @@ class BlockStoryLiveHook(classLoader: ClassLoader) : BaseHook(classLoader) {
             return
         }
         playerClass.hookMethod(methodName, List::class.java) { chain ->
+            if (!chain.thisObject.isMainStoryFeedPlayer()) return@hookMethod chain.proceed()
             StoryLiveFilter.filteredCopyIfChanged(chain.args[0] as? List<Any?>)?.let {
                 val args = chain.args.toTypedArray()
                 args[0] = it
@@ -26,6 +27,7 @@ class BlockStoryLiveHook(classLoader: ClassLoader) : BaseHook(classLoader) {
             it.name == "W2" && it.parameterCount == 3 &&
                 it.parameterTypes[0] == List::class.java
         }?.hookMethod { chain ->
+            if (!chain.thisObject.isMainStoryFeedPlayer()) return@hookMethod chain.proceed()
             StoryLiveFilter.filteredCopyIfChanged(chain.args[0] as? List<Any?>)?.let {
                 val args = chain.args.toTypedArray()
                 args[0] = it
@@ -35,4 +37,12 @@ class BlockStoryLiveHook(classLoader: ClassLoader) : BaseHook(classLoader) {
         }
         Log.s("startHook: BlockStoryLive on ${playerClass.name}#$methodName (+W2)")
     }
+
+    private fun Any.isMainStoryFeedPlayer(): Boolean = runCatching {
+        javaClass.declaredFields.any { field ->
+            if (field.type != String::class.java) return@any false
+            field.isAccessible = true
+            field.get(this) == "StoryVideoFragment"
+        }
+    }.getOrDefault(true)
 }

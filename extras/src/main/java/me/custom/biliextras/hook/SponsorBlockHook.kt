@@ -18,7 +18,6 @@ import me.custom.biliextras.utils.hookAllMethods
 import me.custom.biliextras.utils.hookAllConstructors
 import me.custom.biliextras.utils.hookMethod
 import me.custom.biliextras.utils.mossResponseHandlerReplaceProxy
-import java.lang.reflect.Proxy
 import java.lang.reflect.Method
 import java.util.concurrent.ConcurrentHashMap
 
@@ -524,47 +523,17 @@ class SponsorBlockHook(classLoader: ClassLoader) : BaseHook(classLoader) {
     }
 
     private fun registerOfficialProgressObserver(service: Any) {
-        if (progressObserverService === service && progressObserver != null) return
-        progressObserverService?.unregisterOfficialProgressObserver()
-        progressObserver = null
-        progressObserverService = null
-        syncPollInterval()
-
-        val registerMethod = service.javaClass.methods.firstOrNull {
-            it.name == "registerPlayerProgressObserver" &&
-                it.parameterTypes.size == 1 &&
-                it.parameterTypes[0].name == "tv.danmaku.biliplayerv2.service.PlayerProgressObserver"
-        } ?: run {
-            Log.trace { "SponsorBlock: registerPlayerProgressObserver missing on ${service.javaClass.name}" }
-            return
-        }
-        val observerClass = registerMethod.parameterTypes[0]
-        val observer = Proxy.newProxyInstance(mClassLoader, arrayOf(observerClass)) { proxy, method, args ->
-            when (method.name) {
-                "equals" -> proxy === args?.firstOrNull()
-                "hashCode" -> System.identityHashCode(proxy)
-                "toString" -> "BiliExtrasSponsorBlockProgressObserver@" +
-                    System.identityHashCode(proxy).toString(16)
-                "onPlayerProgressChange" -> {
-                    if (args?.size == 2) {
-                        val positionMs = (args[0] as? Number)?.toLong()
-                        val durationMs = (args[1] as? Number)?.toLong()
-                        if (positionMs != null && durationMs != null) {
-                            checkAndSkip(positionMs, durationMs)
-                        }
-                    }
-                    null
-                }
-                else -> null
-            }
-        }
-        runCatching {
-            registerMethod.invoke(service, observer)
-            progressObserver = observer
-            progressObserverService = service
+        // The official observer list is sensitive to rapid player-core churn. On pages that
+        // create several vd3.p0 instances, repeatedly registering our proxy can destabilize
+        // playback and even kick the user out of the current video. Polling is slower but stays
+        // outside the player's observer chain.
+        if (progressObserver != null || progressObserverService != null) {
+            progressObserverService?.unregisterOfficialProgressObserver()
+            progressObserver = null
+            progressObserverService = null
             syncPollInterval()
-            Log.s("SponsorBlock: registered official PlayerProgressObserver on ${service.javaClass.name}")
-        }.onFailure { Log.e(it) }
+        }
+        syncPollInterval()
     }
 
     private fun Any.unregisterOfficialProgressObserver() {

@@ -37,8 +37,8 @@ android {
         applicationId = "me.custom.biliextras"
         minSdk = 24
         targetSdk = 35
-        versionCode = 83
-        versionName = "1.0.90"
+        versionCode = 86
+        versionName = "1.0.93"
     }
 
     buildTypes {
@@ -72,6 +72,10 @@ android {
         checkReleaseBuilds = false
     }
 
+    testOptions {
+        unitTests.isReturnDefaultValues = true
+    }
+
     dependenciesInfo {
         includeInApk = false
     }
@@ -90,6 +94,8 @@ dependencies {
     implementation(libs.kotlin.stdlib)
     compileOnly("androidx.annotation:annotation:1.9.1")
     implementation(libs.cxx)
+    testImplementation("junit:junit:4.13.2")
+    testImplementation(libs.xposed)
 }
 
 // Android Studio/IntelliJ may request this task during Gradle sync for Kotlin script models.

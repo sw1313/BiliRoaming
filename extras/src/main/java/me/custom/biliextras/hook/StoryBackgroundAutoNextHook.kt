@@ -1,13 +1,17 @@
 package me.custom.biliextras.hook
 
 import android.content.Context
+import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.view.MotionEvent
 import android.view.ViewGroup
 import me.custom.biliextras.BiliPackageLite.Companion.instance
+import me.custom.biliextras.BuildConfig
 import me.custom.biliextras.sponsorblock.SponsorBlockController
 import me.custom.biliextras.utils.Log
 import me.custom.biliextras.utils.ePrefs
+import me.custom.biliextras.utils.hookAllConstructors
 import me.custom.biliextras.utils.hookMethod
 import java.lang.reflect.InvocationTargetException
 import java.lang.reflect.Method
@@ -106,6 +110,11 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
         @Volatile
         var activityPaused = false
 
+        /** A user-paused clip must stay paused through surface rebind and async prepare. */
+        var pausedResumeIdentity: String? = null
+        var pausedResumeHost: String? = null
+        var pausedResumeStoryPlayer: Any? = null
+
         /**
          * Set in u2 when Activity truly pauses (app background). Cleared after w2 handoff finishes
          * or on tab switch / new StoryVideoActivity — gates progress bar retention only to bg→fg.
@@ -146,6 +155,8 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
         /** Cancelled on u2 when a deferred w2 x2 would run while still in bg (log 071837). */
         @Volatile
         var pendingSurfaceRebindRunnable: Runnable? = null
+
+        var surfaceRebindGeneration = 0
 
         @Volatile
         var cachedAppContext: Context? = null
@@ -203,6 +214,21 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
         var resumeFeedSnapshot: List<Any>? = null
 
         @Volatile
+        var spacePageSnapshot: Any? = null
+
+        @Volatile
+        var spaceMetaSnapshot: Any? = null
+
+        @Volatile
+        var relatedVideoDataSnapshot: Any? = null
+
+        /** Navigation anchor owns page/meta/list snapshots, never the global last visited UP. */
+        var spaceSnapshotAnchor: Any? = null
+        var spaceSnapshotType = -1
+        var spaceSnapshotFragment: Any? = null
+        var spaceSnapshotShareData: Any? = null
+
+        @Volatile
         var resumeFeedRestoreInProgress = false
 
         @Volatile
@@ -251,6 +277,7 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
         }
 
         fun finishAppBackgroundResumeSession() {
+            if (pendingPostW2SurfaceRebind) return
             appBackgroundResumeHandoffEligible = false
             val keepFeedGuard = System.currentTimeMillis() <= postResumeFeedGuardUntilMs
             if (!keepFeedGuard) {
@@ -273,6 +300,7 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
 
         /** Drop a posted w2→x2 rebind (Miui brief fg flash then bg again — log 071837). */
         fun cancelPendingSurfaceRebind(reason: String) {
+            surfaceRebindGeneration++
             pendingSurfaceRebindRunnable?.let { mainHandler.removeCallbacks(it) }
             pendingSurfaceRebindRunnable = null
             if (pendingPostW2SurfaceRebind) {
@@ -346,10 +374,90 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
 
     override fun startHook() {
         liveInstance = this
+        hookRelatedVideoDataWrapper()
         hookCancelCheck()
         hookStoryVideoActivityTab()
+        hookStorySpaceFragmentPageState()
         hookStoryPagerPlayer()
-        Log.s("startHook: StoryBackgroundAutoNext (autoNext=${isAutoNextEnabled()} mediaButton=${ePrefs.getBoolean(MEDIA_BUTTON_KEY, false)})")
+        hookPausedResumePlayback()
+        Log.s("startHook: StoryBackgroundAutoNext (module=${BuildConfig.VERSION_NAME} autoNext=${isAutoNextEnabled()} mediaButton=${ePrefs.getBoolean(MEDIA_BUTTON_KEY, false)})")
+    }
+
+    /**
+     * Related-video StorySpace (opened from the title) stores its title count in helper.y.meta.
+     * Official requestFlow reuses the cached related list when a resume request returns empty
+     * items, but rebuilds meta with the *empty response* size, producing "0/0" while the list
+     * still contains playable cards.
+     */
+    private fun hookRelatedVideoDataWrapper() {
+        val relatedDataClass = runCatching {
+            mClassLoader.loadClass("com.bilibili.video.story.helper.y")
+        }.getOrNull() ?: return
+        relatedDataClass.hookAllConstructors { chain ->
+            val meta = chain.args.getOrNull(1)
+            val items = chain.args.getOrNull(2) as? List<*>
+            val size = items?.size ?: 0
+            if (meta != null && size > 0) {
+                val getVideoNum = meta.javaClass.methods.firstOrNull {
+                    it.name == "getVideoNum" && it.parameterCount == 0
+                }
+                val setVideoNum = meta.javaClass.methods.firstOrNull {
+                    it.name == "setVideoNum" &&
+                        it.parameterTypes.contentEquals(arrayOf(Int::class.javaPrimitiveType))
+                }
+                val videoNum = (getVideoNum?.invoke(meta) as? Number)?.toInt() ?: 0
+                if (videoNum <= 0) {
+                    setVideoNum?.invoke(meta, size)
+                    Log.trace { "StoryAutoNext: fix related video meta count 0->$size" }
+                }
+            }
+            val result = chain.proceed()
+            result
+        }
+    }
+
+    private fun hookStorySpaceFragmentPageState() {
+        val spaceClass = runCatching {
+            Class.forName(HOST_SPACE, false, mClassLoader)
+        }.getOrNull() ?: return
+        val shareDataClass = runCatching {
+            mClassLoader.loadClass("com.bilibili.video.story.StoryShareData")
+        }.getOrNull()
+        if (shareDataClass != null) {
+            spaceClass.hookMethod("Mc", shareDataClass, String::class.java) { chain ->
+                val restore = appBackgroundResumeHandoffEligible && resumeHandoffHost == HOST_SPACE &&
+                    visibleOuterTabIndex == 1 && spaceSnapshotShareData != null
+                if (restore) {
+                    // Recreated outer pager must re-enter the paused space, not the main feed's UP.
+                    chain.args[0] = spaceSnapshotShareData
+                } else {
+                    clearSpaceSnapshots()
+                    if (resumeHandoffHost == HOST_SPACE) {
+                        resumeFeedSnapshot = null
+                        resumeHandoffIndex = -1
+                        resumeHandoffId = null
+                        resumeHandoffCount = -1
+                        resumeHandoffPlayerId = -1
+                        resumeHandoffHost = null
+                        postResumeFeedGuardUntilMs = 0L
+                    }
+                    spaceSnapshotShareData = chain.args[0]
+                }
+                val result = chain.proceed()
+                chain.thisObject.captureSpaceSnapshotAnchor()
+                result
+            }
+        }
+        spaceClass.hookMethod("p8", String::class.java) { chain ->
+            val preserve = activityPaused || appBackgroundResumeHandoffEligible
+            if (preserve) {
+                chain.thisObject.captureSpacePageSnapshotIfNeeded("onPagerOut")
+                chain.thisObject.captureRelatedVideoDataSnapshotIfNeeded()
+            }
+            val result = chain.proceed()
+            if (!preserve) clearSpaceSnapshots()
+            result
+        }
     }
 
     /** Called when the in-player menu toggles background auto-next. */
@@ -774,6 +882,7 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
             }
         }
         appBackgroundResumeHandoffEligible = false
+        clearPausedResumeIntent("outer-tab-switch")
         postResumeFeedGuardUntilMs = 0L
         finishAppBackgroundResumeSession()
         cancelForegroundResumeHandoff()
@@ -837,6 +946,7 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
 
     /** Drop stale companion state only when StoryVideoActivity is finishing — not lock-screen recreate. */
     private fun resetStorySessionOnActivityBoundary(reason: String) {
+        clearPausedResumeIntent("activity-boundary")
         isInBackground = false
         activityPaused = false
         backgroundSessionHost = null
@@ -855,6 +965,9 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
         clearOuterTabHandoff()
         resumeHandoffHost = null
         resumeFeedSnapshot = null
+        clearSpaceSnapshots()
+        cancelPendingSurfaceRebind("activity-boundary")
+        cancelPostResumeCatchUp()
         postResumeFeedGuardUntilMs = 0L
         cancelForegroundResumeHandoff()
         stopEndPolling()
@@ -904,7 +1017,11 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
         }.onFailure { Log.e(it) }
     }
 
-    private fun syncVisibleOuterTabFromActivity(activity: Any, preferBackgroundSession: Boolean = false) {
+    private fun syncVisibleOuterTabFromActivity(
+        activity: Any,
+        preferBackgroundSession: Boolean = false,
+        forcePreferredTab: Boolean = false,
+    ) {
         if (preferBackgroundSession) {
             preferredBackgroundResumeTabIndex()?.let { preferred ->
                 if (visibleOuterTabIndex != preferred) {
@@ -914,7 +1031,14 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
                             "host=${visibleSessionHost()}"
                     }
                 }
-                forceActivityOuterTab(activity, preferred, "bg-resume")
+                if (forcePreferredTab) {
+                    forceActivityOuterTab(activity, preferred, "bg-resume-post")
+                } else {
+                    Log.trace {
+                        "StoryAutoNext: defer force outer tab on bg-resume index=$preferred " +
+                            "host=${visibleSessionHost()}"
+                    }
+                }
                 return
             }
         }
@@ -940,6 +1064,16 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
         val activityClass = runCatching {
             Class.forName("com.bilibili.video.story.StoryVideoActivity", false, mClassLoader)
         }.getOrNull() ?: return
+        activityClass.hookMethod("dispatchTouchEvent", MotionEvent::class.java) { chain ->
+            val event = chain.args[0] as? MotionEvent
+            // dispatchTouchEvent may be inherited, so limit the hook to the Story activity.
+            if (activityClass.isInstance(chain.thisObject) && event?.actionMasked == MotionEvent.ACTION_DOWN &&
+                !activityPaused && !isInBackground && pausedResumeIdentity != null
+            ) {
+                clearPausedResumeIntent("user-touch")
+            }
+            chain.proceed()
+        }
         activityClass.hookMethod("onDestroy") { chain ->
             val finishing = runCatching {
                 chain.thisObject.javaClass.getMethod("isFinishing").invoke(chain.thisObject) as? Boolean
@@ -950,6 +1084,7 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
             chain.proceed()
         }
         activityClass.hookMethod("onPause") { chain ->
+            if (!activityPaused) currentVisibleStoryPlayer()?.capturePausedResumeIntent()
             activityPaused = true
             syncVisibleOuterTabFromActivity(chain.thisObject)
             chain.proceed()
@@ -961,7 +1096,11 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
             syncVisibleOuterTabFromActivity(chain.thisObject, preferBackgroundSession = wasBackgroundResume)
             chain.proceed()
             if (wasBackgroundResume && isAutoNextEnabled()) {
-                syncVisibleOuterTabFromActivity(chain.thisObject, preferBackgroundSession = true)
+                syncVisibleOuterTabFromActivity(
+                    chain.thisObject,
+                    preferBackgroundSession = true,
+                    forcePreferredTab = true,
+                )
                 mainHandler.post {
                     currentVisibleStoryPlayer()?.restoreOfficialForegroundChainAfterBackground("activity-onResume")
                 }
@@ -1093,6 +1232,8 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
         }
         if (hostName == HOST_SPACE) {
             upSpaceStoryPlayer = player
+            host.captureSpacePageSnapshotIfNeeded("remember-player")
+            host.captureRelatedVideoDataSnapshotIfNeeded()
         }
         if (player === activeStoryPlayer) {
             activeStoryHost = host
@@ -1238,7 +1379,9 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
             }
             return
         }
-        if (attempt == 0) {
+        val isSpaceEmptyBeforeSync = playerHostName() == HOST_SPACE &&
+            (invokeIntGetter("N1") ?: 0) <= 0
+        if (attempt == 0 && !isSpaceEmptyBeforeSync) {
             restoreResumeFeedSnapshotIfNeeded()
         }
         var resolved = resolveCatchUpIndex(preferredIndex, targetId)
@@ -1255,6 +1398,21 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
         }
         if (resolved < 0) {
             val count = invokeIntGetter("N1") ?: 0
+            if (count <= 0 && playerHostName() == HOST_SPACE) {
+                requestOfficialPagerInForVisibleHost("F2-sync-space-empty")
+                if (attempt < 8) {
+                    mainHandler.postDelayed({
+                        runCatching {
+                            syncPagerToEngineIndexInner(preferredIndex, targetId, attempt + 1)
+                        }.onFailure { Log.e(it) }
+                    }, 250L)
+                    Log.trace {
+                        "StoryAutoNext: wait official space feed before F2 preferred=$preferredIndex " +
+                            "id=$targetId attempt=$attempt"
+                    }
+                    return
+                }
+            }
             if (count <= 0 && (resumeHandoffId != null || resumeFeedSnapshot != null)) {
                 restoreResumeFeedSnapshotIfNeeded()
                 val restored = resolveCatchUpIndex(preferredIndex, targetId)
@@ -1307,7 +1465,13 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
         if (d1Before == resolved && (targetId == null || identitiesMatch(pagerIdBefore, targetId))) {
             applyOfficialResumePosition()
             clearBackgroundSession(resolved, targetId)
-            rebindOfficialSurfaceAtD1("x2 after F2 align skip")
+            if (readOfficialPagerStateQ() == 3) {
+                if (!rebindOfficialSurfaceAtD1("x2 after F2 align skip")) {
+                    postOfficialSurfaceRebindAfterAppBgResume()
+                }
+            } else {
+                postOfficialSurfaceRebindAfterAppBgResume()
+            }
             Log.trace { "StoryAutoNext: pager already at index=$resolved id=$targetId" }
             finishForegroundResumeHandoffIfPending(this)
             finishAppBackgroundResumeSession()
@@ -1336,7 +1500,13 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
         if (d1 == resolved && identityOk) {
             syncStoryPlayerDirectorIndex(resolved)
             // jadx i3→x2 binds holder after F2; F2 alone leaves frozen frame + audio (log 00:17:19).
-            rebindOfficialSurfaceAtD1("x2 after F2 sync ok")
+            if (readOfficialPagerStateQ() == 3) {
+                if (!rebindOfficialSurfaceAtD1("x2 after F2 sync ok")) {
+                    postOfficialSurfaceRebindAfterAppBgResume()
+                }
+            } else {
+                postOfficialSurfaceRebindAfterAppBgResume()
+            }
             clearBackgroundSession(resolved, targetId)
             Log.trace { "StoryAutoNext: F2 sync ok index=$resolved id=$targetId d1=$d1 F1=$f1Id" }
             finishForegroundResumeHandoffIfPending(this)
@@ -1922,8 +2092,12 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
         z0.isAccessible = true
         val atD1 = z0.invoke(adapter, d1) ?: return false
         val atD1Id = atD1.storyIdentity()
-        adapter.javaClass.declaredFields.any { field ->
-            if (field.type.name != "com.bilibili.video.story.StoryDetail") return@any false
+        generateSequence<Class<*>>(adapter.javaClass) { it.superclass }
+            .flatMap { it.declaredFields.asSequence() }.any { field ->
+            // The other StoryDetail field (i) is the previously detached card, not a bound surface.
+            if (field.name !in setOf("h", "f206257h") ||
+                field.type.name != "com.bilibili.video.story.StoryDetail"
+            ) return@any false
             field.isAccessible = true
             val marker = field.get(adapter) ?: return@any false
             identitiesMatch(marker.storyIdentity(), atD1Id)
@@ -1934,7 +2108,7 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
         if (!officialAdapterPlayingMarkerBlocksX2AtD1()) return
         runCatching {
             val adapter = getStoryVideoAdapter() ?: return@runCatching
-            val l1 = adapter.javaClass.declaredMethods.firstOrNull {
+            val l1 = adapter.javaClass.methods.firstOrNull {
                 it.name == "L1" && it.parameterCount == 2
             } ?: return@runCatching
             l1.isAccessible = true
@@ -2152,32 +2326,52 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
      * Force w1 bind after bg: clear stale f206257h, align RecyclerView, then x2 at D1.
      * Official i3→x2 may run before w2 but w1 no-ops on "+++has play" — must clear first.
      */
-    private fun Any.rebindOfficialSurfaceAtD1(logTag: String) {
+    private fun Any.rebindOfficialSurfaceAtD1(logTag: String): Boolean {
         val q = readOfficialPagerStateQ()
         if (q != 3) {
             Log.trace { "StoryAutoNext: $logTag skipped inactive Q=$q" }
-            return
+            return false
         }
         val d1 = invokeIntGetter("D1", "getIndex") ?: -1
+        val count = officialFeedCountReady()
+        if (d1 !in 0 until count || storyItemAt(d1) == null) {
+            Log.trace { "StoryAutoNext: $logTag wait for playable list d1=$d1 count=$count" }
+            return false
+        }
         val pending = resolvePendingEngineIndex(d1)
         if (pending > d1) {
             Log.trace { "StoryAutoNext: $logTag skip rebind — F2 pending engine=$pending d1=$d1 " +
                     "(w2 will sync)" }
-            return
+            return false
         }
         if (d1 >= 0 && trackedIndex > d1 && !backgroundEngineMoved) {
             val sessionId = playingStoryKey ?: activeStoryKey
             val pagerId = storyIdentityAt(d1)
             if (sessionId != null && pagerId != null && !identitiesMatch(sessionId, pagerId)) {
                 Log.trace { "StoryAutoNext: $logTag skip rebind — d1=$d1 stale vs tracked=$trackedIndex" }
-                return
+                return false
             }
         }
         seedNativeStartFromEngineIfNeeded()
         clearOfficialAdapterPlayingMarkerIfNeeded()
         invokeOfficialRecyclerAlignToD1()
         invokeOfficialPlayAtD1(smooth = false)
-        Log.trace { "StoryAutoNext: $logTag (d1=$d1, Q=$q)" }
+        val bound = officialAdapterPlayingMarkerBlocksX2AtD1()
+        Log.trace { "StoryAutoNext: $logTag (d1=$d1, Q=$q bound=$bound)" }
+        if (!bound) Log.trace {
+            val markers = getStoryVideoAdapter()?.let { adapter ->
+                generateSequence<Class<*>>(adapter.javaClass) { it.superclass }
+                    .flatMap { it.declaredFields.asSequence() }.filter {
+                    it.type.name == "com.bilibili.video.story.StoryDetail"
+                }.joinToString { field ->
+                    field.isAccessible = true
+                    "${field.name}=${field.get(adapter)?.storyIdentity()}"
+                }
+            }
+            "StoryAutoNext: rebind state pager=${storyIdentityAt(d1)} " +
+                "engine=${captureEnginePlayingIdentity()} markers=$markers"
+        }
+        return bound
     }
 
     private fun finishForegroundResumeHandoffIfPending(player: Any? = null) {
@@ -2195,6 +2389,7 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
     /** End w2 handoff for the visible-tab player only — hidden-tab w2 must not touch global bg state. */
     private fun Any.completeW2ResumeHandoffCycle() {
         if (!shouldManageBackgroundLoopMode()) return
+        if (pendingPostW2SurfaceRebind) return
         if (pendingForegroundHandoffPosMs >= BACKGROUND_RESUME_MIN_MS &&
             pendingForegroundHandoffPlayerId == System.identityHashCode(this)
         ) {
@@ -2290,25 +2485,47 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
     }
 
     /** Wait for Q=3 (i3 from onPagerIn) then rebind; w2 runs after adapter.onResume(). */
-    private fun Any.scheduleOfficialSurfaceRebindAfterW2(attempt: Int = 0) {
+    private fun Any.scheduleOfficialSurfaceRebindAfterW2(
+        attempt: Int = 0,
+        generation: Int = surfaceRebindGeneration,
+    ) {
+        if (generation != surfaceRebindGeneration) return
+        if (playerHostName() != visibleSessionHost() || currentVisibleStoryPlayer() !== this) {
+            cancelPendingSurfaceRebind("hidden-or-replaced-player")
+            return
+        }
         if (activityPaused || isInBackground) {
             Log.trace { "StoryAutoNext: x2 rebind aborted — back in bg (attempt=$attempt)" }
             pendingPostW2SurfaceRebind = false
             pendingSurfaceRebindRunnable = null
             return
         }
+        // A long screen-off can destroy the adapter without moving the engine index.
+        // Restore the list even when runSync was false; Q=3 alone says nothing about its data.
+        if (officialFeedCountReady() in 0 until resumeHandoffCount) {
+            restoreResumeFeedSnapshotIfNeeded()
+        }
         val q = readOfficialPagerStateQ()
-        if (q != 3) {
-            if (attempt < 5) {
+        val d1 = invokeIntGetter("D1", "getIndex") ?: -1
+        val feedReady = d1 in 0 until officialFeedCountReady() && storyItemAt(d1) != null
+        if (attempt == 2 && (q != 3 || !feedReady)) {
+            requestOfficialPagerInForVisibleHost("x2-rebind-wait-q$q-feed-$feedReady")
+        }
+        if (q != 3 || !feedReady) {
+            if (attempt < 12) {
                 val delayMs = when (attempt) {
                     0 -> 0L
                     1 -> 16L
                     2 -> 50L
-                    else -> 120L
+                    3 -> 120L
+                    4 -> 250L
+                    else -> 500L
                 }
-                mainHandler.postDelayed({ scheduleOfficialSurfaceRebindAfterW2(attempt + 1) }, delayMs)
+                val retry = Runnable { scheduleOfficialSurfaceRebindAfterW2(attempt + 1, generation) }
+                pendingSurfaceRebindRunnable = retry
+                mainHandler.postDelayed(retry, delayMs)
             } else {
-                Log.trace { "StoryAutoNext: x2 rebind aborted inactive Q=$q" }
+                Log.trace { "StoryAutoNext: x2 rebind exhausted Q=$q feedReady=$feedReady (release playback guard)" }
                 pendingPostW2SurfaceRebind = false
                 pendingSurfaceRebindRunnable = null
                 restoreOfficialStoryPlayModeAfterBackground()
@@ -2316,14 +2533,55 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
             }
             return
         }
+        var bound = false
         try {
-            rebindOfficialSurfaceAtD1("x2 rebind after bg resume (no F2 gap, attempt=$attempt)")
+            bound = rebindOfficialSurfaceAtD1("x2 rebind after bg resume (no F2 gap, attempt=$attempt)")
             restoreOfficialStoryPlayModeAfterBackground()
         } finally {
-            pendingPostW2SurfaceRebind = false
-            pendingSurfaceRebindRunnable = null
-            finishAppBackgroundResumeSessionIfForeground()
+            if (!bound && attempt < 12) {
+                val retry = Runnable { scheduleOfficialSurfaceRebindAfterW2(attempt + 1, generation) }
+                pendingSurfaceRebindRunnable = retry
+                mainHandler.postDelayed(retry, 250L)
+            } else {
+                pendingPostW2SurfaceRebind = false
+                pendingSurfaceRebindRunnable = null
+                // A failed rebind must not indefinitely block the user's subsequent page changes.
+                finishAppBackgroundResumeSessionIfForeground()
+            }
         }
+    }
+
+    /**
+     * Official foreground activation is Fragment.Yk(onPagerIn) -> StoryPagerPlayer.Q2(3) -> i3/Eq/x2.
+     * If w2 runs while the tab is visible but Q is still 1, a raw F2 only moves ViewPager2 and
+     * leaves playback stopped. Re-enter the host's official onPagerIn path once, then wait for Q=3.
+     */
+    private fun Any.requestOfficialPagerInForVisibleHost(reason: String): Boolean = runCatching {
+        if (activityPaused || isInBackground) return@runCatching false
+        val hostName = playerHostName() ?: return@runCatching false
+        if (hostName != visibleSessionHost()) return@runCatching false
+        val host = resolveStoryHostFromPlayer() ?: return@runCatching false
+        if (host.javaClass.name != hostName) return@runCatching false
+        host.restoreSpaceSessionContextIfNeeded()
+        host.restoreSpacePageSnapshotIfNeeded()
+        host.restoreRelatedVideoDataSnapshotIfNeeded(rebind = true)
+        if (hostName == HOST_SPACE && host.spaceAnchor() == null) {
+            Log.trace { "StoryAutoNext: skip onPagerIn without space anchor reason=$reason" }
+            return@runCatching false
+        }
+        val onPagerIn = host.javaClass.methods.firstOrNull { method ->
+            method.name == "Yk" &&
+                method.parameterCount == 2 &&
+                Bundle::class.java.isAssignableFrom(method.parameterTypes[0]) &&
+                method.parameterTypes[1] == String::class.java
+        } ?: return@runCatching false
+        onPagerIn.isAccessible = true
+        onPagerIn.invoke(host, Bundle(), null)
+        Log.trace { "StoryAutoNext: request official onPagerIn host=$hostName reason=$reason" }
+        true
+    }.getOrElse {
+        Log.e(it)
+        false
     }
 
     /** Keep u2 handoff aligned when the user swipes or bg auto-next moves ahead of the pause snapshot. */
@@ -2469,9 +2727,8 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
             if (incoming != null && player.consumeBackgroundDeferredH1(incoming)) {
                 return@hookMethod null
             }
-            if (incoming != null && player.shouldBlockDestructiveH1(incoming)) {
-                return@hookMethod null
-            }
+            // Official h1 appends; a small page cannot shrink the existing adapter list.
+            // Replacement guards belong exclusively to W2 / StoryVideoAdapter.F1.
             chain.proceed()
         }
         playerClass.declaredMethods.firstOrNull {
@@ -2569,6 +2826,100 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
         }
     }
 
+    private fun clearPausedResumeIntent(reason: String) {
+        pausedResumeStoryPlayer?.setPausedPrepareFlag(false)
+        pausedResumeIdentity = null
+        pausedResumeHost = null
+        pausedResumeStoryPlayer = null
+        Log.trace { "StoryAutoNext: clear paused resume intent ($reason)" }
+    }
+
+    /** Capture before Activity.onPause lets the official lifecycle pause a playing core. */
+    private fun Any.capturePausedResumeIntent() {
+        val state = invokeIntGetter("getState") ?: return
+        val id = captureEnginePlayingIdentity()
+            ?: storyIdentityAt(invokeIntGetter("D1", "getIndex") ?: -1)
+        if (state == 5 && id != null) {
+            pausedResumeIdentity = id
+            pausedResumeHost = playerHostName()
+            pausedResumeStoryPlayer = innerStoryPlayer()
+            Log.trace { "StoryAutoNext: retain user pause id=$id host=$pausedResumeHost state=$state" }
+        } else {
+            clearPausedResumeIntent("background-state-$state")
+        }
+    }
+
+    private fun Any.shouldRetainPausedResume(): Boolean {
+        val id = pausedResumeIdentity ?: return false
+        if (playerHostName() != pausedResumeHost) return false
+        val visibleId = storyIdentityAt(invokeIntGetter("D1", "getIndex") ?: -1)
+            ?: captureEnginePlayingIdentity()
+        return identitiesMatch(id, visibleId)
+    }
+
+    private fun pausedResumeOwner(storyPlayer: Any): Any? =
+        currentVisibleStoryPlayer()?.takeIf {
+            it.innerStoryPlayer() === storyPlayer && it.shouldRetainPausedResume()
+        }
+
+    /** Official one-shot flag: StoryPlayer.q skips automatic core.resume() on prepared. */
+    private fun Any.setPausedPrepareFlag(paused: Boolean) {
+        runCatching {
+            generateSequence<Class<*>>(javaClass) { it.superclass }
+                .flatMap { it.declaredFields.asSequence() }.firstOrNull {
+                    it.name == "p0" && it.type == Boolean::class.javaPrimitiveType
+                }?.also { it.isAccessible = true }?.setBoolean(this, paused)
+        }.onFailure { Log.e(it) }
+    }
+
+    private fun Any.pauseRetainedResumeIfReady() {
+        if (invokeIntGetter("getState") !in setOf(3, 4)) return
+        javaClass.cachedStoryMethod("pause")?.invoke(this)
+        Log.trace { "StoryAutoNext: preserved paused state after foreground rebind" }
+    }
+
+    private fun hookPausedResumePlayback() {
+        val storyClass = runCatching {
+            Class.forName("com.bilibili.video.story.player.StoryPlayer", false, mClassLoader)
+        }.getOrNull() ?: return
+        storyClass.hookMethod(
+            "h2", Int::class.javaPrimitiveType!!, Boolean::class.javaPrimitiveType!!,
+            Boolean::class.javaPrimitiveType!!, Boolean::class.javaPrimitiveType!!,
+        ) { chain ->
+            if (pausedResumeOwner(chain.thisObject) == null) return@hookMethod chain.proceed()
+            pausedResumeStoryPlayer = chain.thisObject
+            chain.thisObject.setPausedPrepareFlag(true)
+            val args = chain.args.toTypedArray()
+            args[2] = true // Official h2's no-resume flag; holder and metadata still bind normally.
+            val result = chain.proceed(args)
+            chain.thisObject.pauseRetainedResumeIfReady()
+            result
+        }
+        val observerClass = runCatching {
+            Class.forName("${storyClass.name}\$q", false, mClassLoader)
+        }.getOrNull() ?: return
+        observerClass.hookMethod("onPlayerStateChanged", Int::class.javaPrimitiveType!!) { chain ->
+            val story = observerClass.declaredFields.firstOrNull { it.type == storyClass }
+                ?.also { it.isAccessible = true }?.get(chain.thisObject)
+                ?: return@hookMethod chain.proceed()
+            if (pausedResumeOwner(story) == null) return@hookMethod chain.proceed()
+            val state = chain.args[0] as Int
+            if (state == 3) story.setPausedPrepareFlag(true)
+            val result = chain.proceed()
+            // Delayed lifecycle resumes can arrive after w2's handoff ended. Only real input
+            // releases the pause intent, rather than treating a PLAYING callback as user intent.
+            if (state == 3 || state == 4) story.pauseRetainedResumeIfReady()
+            result
+        }
+        runCatching {
+            Class.forName("${storyClass.name}\$v", false, mClassLoader)
+        }.getOrNull()?.hookMethod("D") { chain ->
+            if (pausedResumeIdentity != null) clearPausedResumeIntent("media-play")
+            chain.proceed()
+        }
+        Log.s("StoryAutoNext: hooked paused-state retention for h2 and prepared callback")
+    }
+
     private fun hookStoryPlayerLooping() {
         val storyPlayerClass = "com.bilibili.video.story.player.StoryPlayer".let {
             runCatching { Class.forName(it, false, mClassLoader) }.getOrNull()
@@ -2616,7 +2967,55 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
      * 3. x2 — 仅 defer：handoff 期间 D1 与 engine 不一致时阻止 i3 抢先 x2
      * 4. h1/W2 — 防止 w2 冲刷把 feed 压成 1 条
      */
+    private fun hookForegroundUserDrag(playerClass: Class<*>) {
+        val callback = runCatching {
+            Class.forName("${playerClass.name}\$h", false, mClassLoader)
+        }.getOrNull() ?: playerClass.declaredClasses.firstOrNull { klass ->
+            klass.declaredMethods.any { method ->
+                method.name == "onPageScrollStateChanged" &&
+                    method.parameterTypes.contentEquals(arrayOf(Int::class.javaPrimitiveType))
+            }
+        } ?: return
+        callback.hookMethod("onPageScrollStateChanged", Int::class.javaPrimitiveType!!) { chain ->
+            if (chain.args[0] == 1) { // ViewPager2.SCROLL_STATE_DRAGGING: a real touch gesture.
+                val owner = callback.declaredFields.firstOrNull { it.type == playerClass }
+                    ?.also { it.isAccessible = true }?.get(chain.thisObject)
+                owner?.releaseForegroundResumeForUserDrag()
+            }
+            chain.proceed()
+        }
+        Log.s("StoryAutoNext: hooked ${callback.name} user drag resume release")
+    }
+
+    /** User navigation supersedes an unfinished automatic resume, including its saved index. */
+    private fun Any.releaseForegroundResumeForUserDrag(): Boolean {
+        if (activityPaused || isInBackground || !shouldManageBackgroundLoopMode()) return false
+        clearPausedResumeIntent("foreground-user-drag")
+        if (!appBackgroundResumeHandoffEligible && !pendingPostW2SurfaceRebind &&
+            System.currentTimeMillis() > postResumeFeedGuardUntilMs
+        ) return false
+        cancelPendingSurfaceRebind("foreground-user-drag")
+        cancelPostResumeCatchUp()
+        cancelForegroundResumeHandoff(this)
+        clearPostResumeFeedGuard("foreground-user-drag")
+        finishAppBackgroundResumeSession()
+        backgroundEngineMoved = false
+        backgroundEngineIndex = -1
+        backgroundEngineHost = null
+        backgroundEnginePlayerId = -1
+        val d1 = invokeIntGetter("D1", "getIndex") ?: -1
+        trackedIndex = d1
+        liveEngineIndex = d1
+        storyIdentityAt(d1)?.let {
+            playingStoryKey = it
+            activeStoryKey = it
+        }
+        Log.trace { "StoryAutoNext: released resume for user drag d1=$d1 count=${invokeIntGetter("N1")}" }
+        return true
+    }
+
     private fun hookForegroundSync(playerClass: Class<*>) {
+        hookForegroundUserDrag(playerClass)
         val u2PauseMethod = playerClass.declaredMethods.firstOrNull {
             it.name == "u2" && it.parameterCount == 0
         }
@@ -2631,6 +3030,10 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
                     backgroundSessionHost = visibleSessionHost()
                     isInBackground = true
                     captureActiveStoryPlayer(player)
+                    player.resolveStoryHostFromPlayer()?.let { host ->
+                        host.captureSpacePageSnapshotIfNeeded("u2")
+                        host.captureRelatedVideoDataSnapshotIfNeeded()
+                    }
                     val d1OnPause = player.invokeIntGetter("D1", "getIndex") ?: -1
                     player.captureResumeHandoffIfNeeded(d1OnPause)
                     if (backgroundEngineMoved) {
@@ -2706,6 +3109,11 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
                     stopEndPolling()
                     captureActiveStoryPlayer(player)
                 }
+                if (managesBg && appBgResume) player.resolveStoryHostFromPlayer()?.let { host ->
+                    host.restoreSpaceSessionContextIfNeeded()
+                    host.restoreSpacePageSnapshotIfNeeded()
+                    host.restoreRelatedVideoDataSnapshotIfNeeded(rebind = true)
+                }
                 val preW2Synced = if (runSync) {
                     player.trySyncPagerBeforeW2Proceed(catchUpIndex, pendingId, pagerBefore)
                 } else {
@@ -2727,7 +3135,13 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
                         player.syncVisibleTabTrackingAfterW2()
                         player.syncStoryPlayerDirectorIndex(catchUpIndex)
                         clearBackgroundSession(catchUpIndex, pendingId)
-                        player.rebindOfficialSurfaceAtD1("x2 after pre-w2 F2")
+                        if (player.readOfficialPagerStateQ() == 3) {
+                            if (!player.rebindOfficialSurfaceAtD1("x2 after pre-w2 F2")) {
+                                player.postOfficialSurfaceRebindAfterAppBgResume()
+                            }
+                        } else {
+                            player.postOfficialSurfaceRebindAfterAppBgResume()
+                        }
                         player.completeW2ResumeHandoffCycle()
                     }
                     runSync -> {
@@ -3119,7 +3533,7 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
                 currentId = sessionId
             }
         }
-        if (feedCount >= 2) {
+        if (feedCount >= 1) {
             resumeHandoffCount = feedCount
             resumeHandoffPlayerId = System.identityHashCode(this)
             resumeHandoffHost = playerHostName()
@@ -3141,7 +3555,7 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
         }
         if (sessionIdx < 0 && d1OnPause < 0) return
         if (sessionIdx <= d1OnPause && !isStalePagerVersusSession(d1OnPause)) {
-            if (feedCount >= 2) {
+            if (feedCount >= 1) {
                 val idx = resolveHandoffIndexForFeed(feedCount, d1OnPause, sessionIdx, currentId)
                     .takeIf { it >= 0 } ?: maxOf(sessionIdx, d1OnPause).coerceAtLeast(0)
                 resumeHandoffIndex = idx
@@ -3169,22 +3583,24 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
     /** Copy adapter chain on u2 so w2 can rebuild it if official h1 collapses N1. */
     private fun Any.captureResumeFeedSnapshot(): List<Any>? = runCatching {
         val count = invokeIntGetter("N1") ?: return@runCatching null
-        if (count < 2) return@runCatching null
+        if (count < 1) return@runCatching null
         val v1 = javaClass.methods.firstOrNull {
             it.name == "V1" && it.parameterTypes.contentEquals(arrayOf(Int::class.javaPrimitiveType))
         } ?: return@runCatching null
         val items = ArrayList<Any>(count)
+        val filterUnsafeCards = playerHostName() != HOST_SPACE
         for (i in 0 until count) {
             v1.invoke(this, i)?.let { item ->
-                if ((!StoryLiveFilter.enabled() || !StoryLiveFilter.isStoryLive(item)) &&
-                    (!StoryUpFilter.enabled() || !StoryUpFilter.isBlockedUp(item)) &&
-                    (!StoryBoostFilter.enabled() || !StoryBoostFilter.isBoostMarked(item))
+                if (!filterUnsafeCards ||
+                    ((!StoryLiveFilter.enabled() || !StoryLiveFilter.isStoryLive(item)) &&
+                        (!StoryUpFilter.enabled() || !StoryUpFilter.isBlockedUp(item)) &&
+                        (!StoryBoostFilter.enabled() || !StoryBoostFilter.isBoostMarked(item)))
                 ) {
                     items.add(item)
                 }
             }
         }
-        items.takeIf { it.size >= 2 }
+        items.takeIf { it.isNotEmpty() }
     }.getOrNull()
 
     private fun Any.refreshResumeFeedSnapshotAfterBackgroundAppend(source: String) {
@@ -3207,6 +3623,7 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
     }
 
     private fun filterResumeFeedSnapshotItems(snapshot: MutableList<Any>) {
+        if (resumeHandoffHost == HOST_SPACE) return
         val before = snapshot.size
         snapshot.removeAll { item ->
             (StoryLiveFilter.enabled() && StoryLiveFilter.isStoryLive(item)) ||
@@ -3227,7 +3644,7 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
     }
 
     private fun Any.canUseResumeFeedSnapshotForPlayer(): Boolean {
-        if (resumeFeedSnapshot == null || resumeHandoffCount < 2) return false
+        if (resumeFeedSnapshot == null || resumeHandoffCount < 1) return false
         if (!ownsResumeHandoffHost()) return false
         if (resumeHandoffPlayerId > 0 &&
             resumeHandoffPlayerId != System.identityHashCode(this) &&
@@ -3299,7 +3716,7 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
         if (resumeFeedRestoreInProgress) return false
         if (!canUseResumeFeedSnapshotForPlayer()) return false
         val snapshot = resumeFeedSnapshot ?: return false
-        if (snapshot.size < 2 || resumeHandoffCount < 2) return false
+        if (snapshot.isEmpty() || resumeHandoffCount < 1) return false
         val countBefore = officialFeedCountReady()
         if (countBefore < 0) {
             Log.trace { "StoryAutoNext: skip feed restore — adapter not ready" }
@@ -3319,7 +3736,7 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
             } ?: return@runCatching false
             val batch = ArrayList(snapshot)
             filterResumeFeedSnapshotItems(batch)
-            if (batch.size < 2) {
+            if (batch.isEmpty()) {
                 Log.trace { "StoryAutoNext: skip feed restore — snapshot empty after live filter" }
                 return@runCatching false
             }
@@ -3373,26 +3790,6 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
                 }
             }
             current = current.cause
-        }
-        return false
-    }
-
-    /** Block w2 deferred h1 that shrinks the fg session feed (log: count=39 → 1). */
-    private fun Any.shouldBlockDestructiveH1(incoming: List<*>): Boolean {
-        if (resumeFeedRestoreInProgress) return false
-        if (backgroundAppendH1InProgress) return false
-        if (!isResumeHandoffArmed()) return false
-        if (resumeHandoffCount < 2) return false
-        if (!ownsResumeHandoffHost()) return false
-        val host = playerHostName()
-        if (host != null && host != visibleSessionHost()) return false
-        if (incoming.size >= resumeHandoffCount) return false
-        if (resumeHandoffCount > incoming.size) {
-            Log.trace {
-                "StoryAutoNext: block destructive h1 shrink $resumeHandoffCount->${incoming.size} " +
-                    "resumeIdx=$resumeHandoffIndex id=$resumeHandoffId"
-            }
-            return true
         }
         return false
     }
@@ -3462,6 +3859,14 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
             if (count > catchUpIndex || (pendingId != null && indexOfStoryIdentity(pendingId) >= 0)) {
                 return syncPagerIndexForW2Resume(catchUpIndex, pendingId, pagerBefore, "post-w2-restore")
             }
+        }
+        if (count == 0 && playerHostName() == HOST_SPACE) {
+            Log.trace {
+                "StoryAutoNext: post-w2 wait official space list saved=$resumeHandoffCount " +
+                    "idx=$catchUpIndex"
+            }
+            requestOfficialPagerInForVisibleHost("post-w2-space-empty")
+            return false
         }
         if (count == 0 && canUseResumeFeedSnapshotForPlayer()) {
             Log.trace { "StoryAutoNext: post-w2 restore last resort count=0 saved=$resumeHandoffCount" }
@@ -4189,6 +4594,7 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
     private fun checkPlaybackEndAndNext() {
         if (!isAutoNextEnabled() || !isInBackground || !activityPaused) return
         val root = storyPlayerForBackgroundAutoNext() ?: return
+        if (root.shouldRetainPausedResume()) return
         val core = liveStoryPlayerCore() ?: return
         val position = core.invokeLongGetter("getCurrentPosition", "getRealCurrentPosition") ?: return
         val duration = core.invokeLongGetter("getDuration", "getRealDuration") ?: return
@@ -4291,6 +4697,219 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
         }
         resolved
     }.getOrNull()
+
+    private fun clearSpaceSnapshots() {
+        spacePageSnapshot = null
+        spaceMetaSnapshot = null
+        relatedVideoDataSnapshot = null
+        spaceSnapshotAnchor = null
+        spaceSnapshotType = -1
+        spaceSnapshotFragment = null
+        spaceSnapshotShareData = null
+    }
+
+    private fun Any.spaceAnchor(): Any? = runCatching {
+        if (javaClass.name != HOST_SPACE) return@runCatching null
+        javaClass.declaredFields.firstOrNull {
+            it.type.name == "com.bilibili.video.story.StoryDetail"
+        }?.also { it.isAccessible = true }?.get(this)
+    }.getOrNull()
+
+    private fun Any.captureSpaceSnapshotAnchor() {
+        val anchor = spaceAnchor() ?: return
+        if (spaceSnapshotAnchor != null &&
+            (spaceSnapshotType != relatedSpaceType() ||
+                !identitiesMatch(spaceSnapshotAnchor?.storyIdentity(), anchor.storyIdentity()))
+        ) {
+            spacePageSnapshot = null
+            spaceMetaSnapshot = null
+            relatedVideoDataSnapshot = null
+        }
+        spaceSnapshotAnchor = anchor
+        spaceSnapshotType = relatedSpaceType()
+        spaceSnapshotFragment = this
+    }
+
+    private fun Any.ownsSpaceSnapshot(): Boolean =
+        javaClass.name == HOST_SPACE && spaceSnapshotFragment === this &&
+            spaceSnapshotType == relatedSpaceType() &&
+            identitiesMatch(spaceSnapshotAnchor?.storyIdentity(), spaceAnchor()?.storyIdentity())
+
+    /** Rebuild the official navigation context before asking an empty space to fetch its list. */
+    private fun Any.restoreSpaceSessionContextIfNeeded() {
+        if (javaClass.name != HOST_SPACE || !appBackgroundResumeHandoffEligible ||
+            resumeHandoffHost != HOST_SPACE || visibleOuterTabIndex != 1
+        ) return
+        if (spaceAnchor() != null) return
+        val shareData = spaceSnapshotShareData ?: return
+        runCatching {
+            val restoreContext = javaClass.declaredMethods.firstOrNull {
+                it.name == "oq" && it.parameterCount == 1 &&
+                    it.parameterTypes[0].isInstance(shareData)
+            }?.also { it.isAccessible = true } ?: return@runCatching
+            restoreContext.invoke(this, shareData)
+            spaceSnapshotFragment = this
+            Log.trace { "StoryAutoNext: restored space navigation context type=$spaceSnapshotType" }
+        }.onFailure { Log.e(it) }
+    }
+
+    private fun relatedVideoDataSize(data: Any?): Int = runCatching {
+        val list = data?.javaClass?.methods?.firstOrNull {
+            it.name == "d" && it.parameterCount == 0
+        }?.invoke(data) as? List<*>
+        list?.size ?: 0
+    }.getOrDefault(0)
+
+    private fun relatedVideoMetaCount(data: Any?): Int = runCatching {
+        val meta = data?.javaClass?.methods?.firstOrNull {
+            it.name == "b" && it.parameterCount == 0
+        }?.invoke(data) ?: return@runCatching 0
+        (meta.javaClass.methods.firstOrNull {
+            it.name == "getVideoNum" && it.parameterCount == 0
+        }?.invoke(meta) as? Number)?.toInt() ?: 0
+    }.getOrDefault(0)
+
+    private fun fixRelatedVideoMetaCount(data: Any?): Boolean = runCatching {
+        val size = relatedVideoDataSize(data)
+        if (size <= 0 || relatedVideoMetaCount(data) > 0) return@runCatching false
+        val meta = data?.javaClass?.methods?.firstOrNull {
+            it.name == "b" && it.parameterCount == 0
+        }?.invoke(data) ?: return@runCatching false
+        val setter = meta.javaClass.methods.firstOrNull {
+            it.name == "setVideoNum" &&
+                it.parameterTypes.contentEquals(arrayOf(Int::class.javaPrimitiveType))
+        } ?: return@runCatching false
+        setter.invoke(meta, size)
+        Log.trace { "StoryAutoNext: fix related cached meta count 0->$size" }
+        true
+    }.getOrDefault(false)
+
+    private fun Any.relatedSpaceType(): Int = runCatching {
+        javaClass.declaredFields.firstOrNull { it.name == "y" || it.name == "f209127y" }
+            ?.also { it.isAccessible = true }
+            ?.getInt(this) ?: -1
+    }.getOrDefault(-1)
+
+    private fun Any.relatedVideoDataField(): java.lang.reflect.Field? = runCatching {
+        javaClass.declaredFields.firstOrNull {
+            it.type.name == "com.bilibili.video.story.helper.y"
+        }?.also { it.isAccessible = true }
+    }.getOrNull()
+
+    private fun Any.spaceDataSource(): Any? = runCatching {
+        if (javaClass.name != HOST_SPACE) return@runCatching null
+        javaClass.declaredFields.firstOrNull {
+            it.type.name == "com.bilibili.video.story.space.j"
+        }?.also { it.isAccessible = true }?.get(this)
+    }.getOrNull()
+
+    private fun Any.spacePageTotal(): Int = runCatching {
+        (javaClass.methods.firstOrNull { it.name == "getTotal" && it.parameterCount == 0 }
+            ?.invoke(this) as? Number)?.toInt() ?: 0
+    }.getOrDefault(0)
+
+    private fun Any.captureSpacePageSnapshotIfNeeded(source: String) {
+        captureSpaceSnapshotAnchor()
+        if (!ownsSpaceSnapshot() || relatedSpaceType() == 4) return
+        val dataSource = spaceDataSource() ?: return
+        val page = runCatching {
+            dataSource.javaClass.methods.firstOrNull { it.name == "f" && it.parameterCount == 0 }
+                ?.invoke(dataSource)
+        }.getOrNull()
+        val meta = runCatching {
+            dataSource.javaClass.methods.firstOrNull { it.name == "e" && it.parameterCount == 0 }
+                ?.invoke(dataSource)
+        }.getOrNull()
+        if (page != null && page.spacePageTotal() > 0) {
+            spacePageSnapshot = page
+            spaceMetaSnapshot = meta
+            Log.trace { "StoryAutoNext: snapshot space page total=${page.spacePageTotal()} source=$source" }
+        }
+    }
+
+    private fun Any.restoreSpacePageSnapshotIfNeeded(): Boolean = runCatching {
+        if (!ownsSpaceSnapshot() || relatedSpaceType() == 4) return@runCatching false
+        val snapshot = spacePageSnapshot ?: return@runCatching false
+        val snapshotTotal = snapshot.spacePageTotal()
+        if (snapshotTotal <= 0) return@runCatching false
+        val dataSource = spaceDataSource() ?: return@runCatching false
+        val currentPage = dataSource.javaClass.methods.firstOrNull {
+            it.name == "f" && it.parameterCount == 0
+        }?.invoke(dataSource)
+        if (currentPage != null && currentPage.spacePageTotal() > 0) {
+            spacePageSnapshot = currentPage
+            spaceMetaSnapshot = dataSource.javaClass.methods.firstOrNull {
+                it.name == "e" && it.parameterCount == 0
+            }?.invoke(dataSource)
+            return@runCatching false
+        }
+        dataSource.javaClass.methods.firstOrNull {
+            it.name == "k" && it.parameterCount == 1
+        }?.invoke(dataSource, snapshot)
+        dataSource.javaClass.methods.firstOrNull {
+            it.name == "j" && it.parameterCount == 1
+        }?.invoke(dataSource, spaceMetaSnapshot)
+        Log.trace { "StoryAutoNext: restore space page total=$snapshotTotal" }
+        true
+    }.getOrElse {
+        Log.e(it)
+        false
+    }
+
+    private fun Any.captureRelatedVideoDataSnapshotIfNeeded() {
+        captureSpaceSnapshotAnchor()
+        if (!ownsSpaceSnapshot() || relatedSpaceType() != 4) return
+        val data = relatedVideoDataField()?.get(this) ?: return
+        if (relatedVideoDataSize(data) > 0) {
+            relatedVideoDataSnapshot = data
+            Log.trace { "StoryAutoNext: snapshot related data size=${relatedVideoDataSize(data)}" }
+        }
+    }
+
+    private fun Any.restoreRelatedVideoDataSnapshotIfNeeded(rebind: Boolean): Boolean = runCatching {
+        if (!ownsSpaceSnapshot() || relatedSpaceType() != 4) return@runCatching false
+        val snapshot = relatedVideoDataSnapshot ?: return@runCatching false
+        val snapshotSize = relatedVideoDataSize(snapshot)
+        if (snapshotSize <= 0) return@runCatching false
+        val field = relatedVideoDataField() ?: return@runCatching false
+        val current = field.get(this)
+        if (relatedVideoDataSize(current) > 0) {
+            fixRelatedVideoMetaCount(current)
+            relatedVideoDataSnapshot = current
+            restoreRelatedVideoModelCache(current)
+            if (rebind) {
+                Log.trace { "StoryAutoNext: keep existing related data size=${relatedVideoDataSize(current)}" }
+                return@runCatching true
+            }
+            return@runCatching false
+        }
+        field.set(this, snapshot)
+        fixRelatedVideoMetaCount(snapshot)
+        restoreRelatedVideoModelCache(snapshot)
+        Log.trace { "StoryAutoNext: restore related data source size=$snapshotSize rebind=$rebind" }
+        true
+    }.getOrElse {
+        Log.e(it)
+        false
+    }
+
+    private fun Any.restoreRelatedVideoModelCache(data: Any) {
+        val aid = runCatching {
+            (data.javaClass.methods.firstOrNull { it.name == "a" && it.parameterCount == 0 }
+                ?.invoke(data) as? Number)?.toLong()
+        }.getOrNull() ?: return
+        val viewModel = runCatching {
+            javaClass.declaredMethods.firstOrNull { it.name == "xq" && it.parameterCount == 0 }
+                ?.also { it.isAccessible = true }
+                ?.invoke(this)
+        }.getOrNull() ?: return
+        runCatching {
+            val cache = viewModel.javaClass.declaredFields.firstOrNull { field ->
+                Map::class.java.isAssignableFrom(field.type)
+            }?.also { it.isAccessible = true }?.get(viewModel) as? MutableMap<Any?, Any?>
+            cache?.put(aid, data)
+        }.onFailure { Log.e(it) }
+    }
 
     private fun Any.callOfficialStoryLoadMore(
         index: Int,
