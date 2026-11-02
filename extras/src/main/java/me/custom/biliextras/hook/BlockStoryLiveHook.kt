@@ -15,7 +15,9 @@ class BlockStoryLiveHook(classLoader: ClassLoader) : BaseHook(classLoader) {
             return
         }
         playerClass.hookMethod(methodName, List::class.java) { chain ->
-            if (!chain.thisObject.isMainStoryFeedPlayer()) return@hookMethod chain.proceed()
+            if (!chain.thisObject.isMainStoryFeedPlayer() ||
+                StoryBackgroundAutoNextHook.isRestoringFeedFor(chain.thisObject)
+            ) return@hookMethod chain.proceed()
             StoryLiveFilter.filteredCopyIfChanged(chain.args[0] as? List<Any?>)?.let {
                 val args = chain.args.toTypedArray()
                 args[0] = it
@@ -27,7 +29,9 @@ class BlockStoryLiveHook(classLoader: ClassLoader) : BaseHook(classLoader) {
             it.name == "W2" && it.parameterCount == 3 &&
                 it.parameterTypes[0] == List::class.java
         }?.hookMethod { chain ->
-            if (!chain.thisObject.isMainStoryFeedPlayer()) return@hookMethod chain.proceed()
+            if (!chain.thisObject.isMainStoryFeedPlayer() ||
+                StoryBackgroundAutoNextHook.isRestoringFeedFor(chain.thisObject)
+            ) return@hookMethod chain.proceed()
             StoryLiveFilter.filteredCopyIfChanged(chain.args[0] as? List<Any?>)?.let {
                 val args = chain.args.toTypedArray()
                 args[0] = it
