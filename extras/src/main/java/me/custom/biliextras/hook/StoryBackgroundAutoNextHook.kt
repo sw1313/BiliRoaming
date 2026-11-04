@@ -449,6 +449,7 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
                     visibleOuterTabIndex == 1 && spaceSnapshotShareData != null
                 if (restore) {
                     // Recreated outer pager must re-enter the paused space, not the main feed's UP.
+                    clearSpaceEntryDialogRequest(spaceSnapshotShareData!!)
                     chain.args[0] = spaceSnapshotShareData
                 } else {
                     clearSpaceSnapshots()
@@ -1120,6 +1121,8 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
             HOST_SPACE -> upSpaceStoryPlayer?.let { activeStoryPlayer = it }
             else -> mainFeedStoryPlayer?.let { activeStoryPlayer = it }
         }
+        // A recreated main adapter may still be empty until Yk restores its retained chain.
+        currentVisibleStoryPlayer()?.hideStaleEmptyFeedPlaceholder()
         val host = visibleSessionHost()
         val generation = ++outerTabRenderRecoveryGeneration
         listOf(200L, 600L, 1_200L).forEach { delay ->
@@ -2723,13 +2726,22 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
         holder.javaClass.cachedStoryMethod("x1")?.invoke(holder)
     }.getOrNull()
 
-    /** Snapshot W2 bypasses the fragment's network callback that normally hides emptyView. */
+    private fun Any.hasPendingRetainedMainContent(): Boolean {
+        if (!isMainFeedStoryPlayer()) return false
+        val saved = retainedMainTab ?: return false
+        if (!saved.away && !(saved.returning && saved.returnPlayer === this)) return false
+        return identitiesMatch(saved.rows.getOrNull(saved.index)?.storyIdentity(), saved.identity)
+    }
+
+    /** A retained original chain is content even before Yk/W2 has refilled the adapter. */
     private fun Any.hideStaleEmptyFeedPlaceholder(): Boolean = runCatching {
         if (activityPaused || isInBackground || playerHostName() != visibleSessionHost()) {
             return@runCatching false
         }
         val index = invokeIntGetter("D1", "getIndex") ?: return@runCatching false
-        if (index !in 0 until officialFeedCountReady() || storyItemAt(index) == null) {
+        if ((index !in 0 until officialFeedCountReady() || storyItemAt(index) == null) &&
+            !hasPendingRetainedMainContent()
+        ) {
             return@runCatching false
         }
         val host = storyPagerHost() ?: return@runCatching false
@@ -5384,6 +5396,17 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
             spaceSnapshotType == relatedSpaceType() &&
             identitiesMatch(spaceSnapshotAnchor?.storyIdentity(), spaceAnchor()?.storyIdentity())
 
+    /** Entry dialogs are one-shot requests; restored FragmentManager state owns any open panel. */
+    private fun clearSpaceEntryDialogRequest(shareData: Any) {
+        runCatching {
+            val setter = shareData.javaClass.methods.firstOrNull {
+                it.name == "setStorySpaceShowDialog" && it.parameterCount == 1
+            } ?: return@runCatching
+            val none = setter.parameterTypes[0].getField("None").get(null)
+            setter.invoke(shareData, none)
+        }.onFailure { Log.e(it) }
+    }
+
     /** Rebuild the official navigation context before asking an empty space to fetch its list. */
     private fun Any.restoreSpaceSessionContextIfNeeded() {
         if (javaClass.name != HOST_SPACE || !appBackgroundResumeHandoffEligible ||
@@ -5396,6 +5419,7 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
                 it.name == "oq" && it.parameterCount == 1 &&
                     it.parameterTypes[0].isInstance(shareData)
             }?.also { it.isAccessible = true } ?: return@runCatching
+            clearSpaceEntryDialogRequest(shareData)
             restoreContext.invoke(this, shareData)
             spaceSnapshotFragment = this
             Log.trace { "StoryAutoNext: restored space navigation context type=$spaceSnapshotType" }

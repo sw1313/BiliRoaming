@@ -60,6 +60,47 @@ public final class StoryResumeRegressionTest {
         assertEquals(4, call("relatedSpaceType", new StorySpaceFragment(4, null)));
     }
 
+    @Test public void sameAnchorCannotSharePageCountBetweenUpAndRelatedModes() throws Exception {
+        StoryDetail anchor = new StoryDetail("BVsharedAnchor", 7);
+        StorySpaceFragment reused = new StorySpaceFragment(1, anchor);
+        reused.source.k(new j.Page(317));
+        call("captureSpacePageSnapshotIfNeeded", reused, "up-mode");
+        reused.y = 4;
+        com.bilibili.video.story.helper.y related = new com.bilibili.video.story.helper.y(
+            Arrays.asList(new StoryDetail("BVrelated0", 20), new StoryDetail("BVrelated1", 21)));
+        reused.related = related;
+        call("captureRelatedVideoDataSnapshotIfNeeded", reused);
+        reused.source.k(null);
+        reused.related = null;
+        assertEquals(false, call("restoreSpacePageSnapshotIfNeeded", reused));
+        assertEquals(true, call("restoreRelatedVideoDataSnapshotIfNeeded", reused, false));
+        assertSame(related, reused.related);
+        assertEquals(2, related.b().getVideoNum());
+        assertNull(reused.source.f());
+        reused.y = 1;
+        call("captureSpaceSnapshotAnchor", reused);
+        assertEquals(false, call("restoreRelatedVideoDataSnapshotIfNeeded", reused, false));
+        assertEquals(false, call("restoreSpacePageSnapshotIfNeeded", reused));
+    }
+
+    @Test public void newRelatedSourceCannotInheritThePreviousVideosList() throws Exception {
+        StorySpaceFragment reused = new StorySpaceFragment(4, new StoryDetail("BVsourceA", 1));
+        com.bilibili.video.story.helper.y first = new com.bilibili.video.story.helper.y(Arrays.asList("A0", "A1"));
+        reused.related = first;
+        call("captureRelatedVideoDataSnapshotIfNeeded", reused);
+        reused.d = new StoryDetail("BVsourceB", 2);
+        reused.related = null;
+        assertEquals(false, call("restoreRelatedVideoDataSnapshotIfNeeded", reused, true));
+        assertNull(reused.related);
+        com.bilibili.video.story.helper.y second = new com.bilibili.video.story.helper.y(Arrays.asList("B0", "B1", "B2"));
+        reused.related = second;
+        call("captureRelatedVideoDataSnapshotIfNeeded", reused);
+        reused.related = null;
+        assertEquals(true, call("restoreRelatedVideoDataSnapshotIfNeeded", reused, true));
+        assertSame(second, reused.related);
+        assertEquals(3, reused.related.b().getVideoNum());
+    }
+
     private com.bilibili.video.story.player.StoryPagerPlayer pausedPlayer(int stateCode) {
         com.bilibili.video.story.player.StoryPagerPlayer player =
             new com.bilibili.video.story.player.StoryPagerPlayer();
@@ -312,6 +353,49 @@ public final class StoryResumeRegressionTest {
         assertSame(anchor, recreated.d);
         assertEquals(4, recreated.y);
         assertEquals(true, call("ownsSpaceSnapshot", recreated));
+    }
+
+    @Test public void restoringUpAndRelatedDoesNotReplayTheirEntryDialogRequests() throws Exception {
+        for (int type : new int[] {1, 4}) {
+            StoryDetail anchor = new StoryDetail("BVentry" + type, type);
+            com.bilibili.video.story.StoryShareData saved = new com.bilibili.video.story.StoryShareData(
+                type, anchor, type == 1
+                    ? com.bilibili.video.story.ShowDialogType.ShowCollectionDialogOnStart
+                    : com.bilibili.video.story.ShowDialogType.ShowIntroDialogOnStart);
+            state.setSpaceSnapshotShareData(saved);
+            state.setResumeHandoffHost("com.bilibili.video.story.space.StorySpaceFragment");
+            state.setAppBackgroundResumeHandoffEligible(true);
+            StorySpaceFragment recreated = new StorySpaceFragment(0, null);
+            call("restoreSpaceSessionContextIfNeeded", recreated);
+            assertSame(anchor, recreated.d);
+            assertEquals(type, recreated.y);
+            assertSame(com.bilibili.video.story.ShowDialogType.None, recreated.dialog);
+        }
+    }
+
+    @Test public void ordinarySpaceEntryKeepsItsRequestedPanel() throws Exception {
+        com.bilibili.video.story.StoryShareData saved = new com.bilibili.video.story.StoryShareData(
+            1, new StoryDetail("BVentry", 1), com.bilibili.video.story.ShowDialogType.ShowCollectionDialogOnStart);
+        state.setSpaceSnapshotShareData(saved);
+        state.setResumeHandoffHost("com.bilibili.video.story.space.StorySpaceFragment");
+        StorySpaceFragment fresh = new StorySpaceFragment(0, null);
+        call("restoreSpaceSessionContextIfNeeded", fresh);
+        assertNull(fresh.d);
+        assertSame(com.bilibili.video.story.ShowDialogType.ShowCollectionDialogOnStart, saved.getStorySpaceShowDialog());
+    }
+
+    @Test public void existingSpaceContextDoesNotChangeAnOpenPanel() throws Exception {
+        StoryDetail anchor = new StoryDetail("BVexisting", 1);
+        com.bilibili.video.story.StoryShareData saved = new com.bilibili.video.story.StoryShareData(
+            1, anchor, com.bilibili.video.story.ShowDialogType.ShowCollectionDialogOnStart);
+        state.setSpaceSnapshotShareData(saved);
+        state.setResumeHandoffHost("com.bilibili.video.story.space.StorySpaceFragment");
+        state.setAppBackgroundResumeHandoffEligible(true);
+        StorySpaceFragment existing = new StorySpaceFragment(1, anchor);
+        existing.dialog = com.bilibili.video.story.ShowDialogType.ShowCollectionDialogOnStart;
+        call("restoreSpaceSessionContextIfNeeded", existing);
+        assertSame(com.bilibili.video.story.ShowDialogType.ShowCollectionDialogOnStart, existing.dialog);
+        assertSame(existing.dialog, saved.getStorySpaceShowDialog());
     }
 
     @Test public void pendingSurfaceBindKeepsHandoffAndCancellationInvalidatesRetries() {
@@ -744,6 +828,35 @@ public final class StoryResumeRegressionTest {
         assertEquals(false, call("hideStaleEmptyFeedPlaceholder", player));
         state.setActivityPaused(false);
         state.setInBackground(true);
+        assertEquals(false, call("hideStaleEmptyFeedPlaceholder", player));
+        assertEquals(0, player.F.view.empty.visibility);
+    }
+
+    @Test public void retainedMainReturnHidesPlaceholderBeforeTheAdapterRefill() throws Exception {
+        com.bilibili.video.story.player.StoryPagerPlayer player = mainTabPlayer();
+        player.F = new com.bilibili.video.story.StoryVideoFragment();
+        assertEquals(true, call("captureRetainedMainTab", player));
+        call("markRetainedMainTabAway", player);
+        player.adapter.items.clear();
+        player.adapter.current = null;
+        assertEquals(true, call("hasPendingRetainedMainContent", player));
+        assertEquals(true, call("hideStaleEmptyFeedPlaceholder", player));
+        assertEquals(8, player.F.view.empty.visibility);
+        assertEquals(0, player.N1());
+        call("clearRetainedMainTab", "explicit-refresh");
+        player.F.view.empty.visibility = 0;
+        assertEquals(false, call("hideStaleEmptyFeedPlaceholder", player));
+        assertEquals(0, player.F.view.empty.visibility);
+    }
+
+    @Test public void retainedMainCannotHidePlaceholderWhileSpaceIsVisible() throws Exception {
+        com.bilibili.video.story.player.StoryPagerPlayer player = mainTabPlayer();
+        player.F = new com.bilibili.video.story.StoryVideoFragment();
+        assertEquals(true, call("captureRetainedMainTab", player));
+        call("markRetainedMainTabAway", player);
+        player.adapter.items.clear();
+        player.adapter.current = null;
+        state.setVisibleOuterTabIndex(1);
         assertEquals(false, call("hideStaleEmptyFeedPlaceholder", player));
         assertEquals(0, player.F.view.empty.visibility);
     }

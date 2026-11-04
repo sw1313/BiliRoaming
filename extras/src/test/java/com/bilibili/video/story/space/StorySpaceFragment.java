@@ -2,10 +2,11 @@ package com.bilibili.video.story.space;
 
 import com.bilibili.video.story.StoryDetail;
 
-public final class StorySpaceFragment {
+public class StorySpaceFragment {
     // Actual DEX field names, rather than JADX's disambiguated display names.
     public int y;
     public StoryDetail d;
+    public com.bilibili.video.story.ShowDialogType dialog;
     public final j source = new j();
     public com.bilibili.video.story.helper.y related;
     public FeedView view = new FeedView();
@@ -30,4 +31,9 @@ public final class StorySpaceFragment {
 
     public StorySpaceFragment(int type, StoryDetail anchor) { y = type; d = anchor; }
     private void oq(StorySpaceFragment saved) { y = saved.y; d = saved.d; }
+    private void oq(com.bilibili.video.story.StoryShareData saved) {
+        y = saved.type;
+        d = saved.anchor;
+        dialog = saved.getStorySpaceShowDialog();
+    }
 }
