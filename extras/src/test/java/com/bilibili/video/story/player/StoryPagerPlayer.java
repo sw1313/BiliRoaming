@@ -19,6 +19,7 @@ public final class StoryPagerPlayer {
     public StoryVideoAdapter adapter = new StoryVideoAdapter();
     public final f metadata = new f();
     public int playCalls;
+    public int replaceCalls;
     private void x2(boolean smooth) { playCalls++; story.playing = V1(index); adapter.h = story.playing; }
     public int D1() { return index; }
     public void F2(int target, boolean smooth) { if (target >= 0 && target < N1()) index = target; }
@@ -28,6 +29,7 @@ public final class StoryPagerPlayer {
     public StoryDetail F1() { return V1(index); }
     private java.util.List<StoryDetail> l3(java.util.List<StoryDetail> rows) { return new java.util.ArrayList<>(rows); }
     public void W2(java.util.List<StoryDetail> items, java.util.List<?> ignored, int index) {
+        replaceCalls++;
         filterBypassObserved = me.custom.biliextras.hook.StoryBackgroundAutoNextHook.Companion.isRestoringFeedFor(this);
         adapter.items.clear();
         adapter.items.addAll(items);

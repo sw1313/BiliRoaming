@@ -21,6 +21,14 @@ import java.util.IdentityHashMap
 import java.util.concurrent.ConcurrentHashMap
 
 class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoader) {
+    private data class RetainedMainTab(
+        var rows: List<Any>, var index: Int, var identity: String,
+        var positionMs: Long, var paused: Boolean,
+        var away: Boolean = false, var returning: Boolean = false,
+        var returnPlayer: Any? = null,
+        var navigationReleased: Boolean = false,
+    )
+
     companion object {
         const val PREF_KEY = "story_background_auto_next"
         const val MEDIA_BUTTON_KEY = "media_button_control"
@@ -235,9 +243,12 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
         @Volatile
         var resumeFeedRestoreInProgress = false
         var resumeFeedRestorePlayer: Any? = null
+        private var retainedMainTab: RetainedMainTab? = null
+        private var mainTabRestoreOwner: Any? = null
+        private val hookedMainRefreshClasses = ConcurrentHashMap.newKeySet<Class<*>>()
 
         fun isRestoringFeedFor(player: Any): Boolean =
-            resumeFeedRestoreInProgress && resumeFeedRestorePlayer === player
+            (resumeFeedRestoreInProgress && resumeFeedRestorePlayer === player) || mainTabRestoreOwner === player
 
         @Volatile
         var postResumeFeedGuardUntilMs = 0L
@@ -386,6 +397,7 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
         hookCancelCheck()
         hookStoryVideoActivityTab()
         hookStorySpaceFragmentPageState()
+        hookMainTabRetention()
         hookStoryPagerPlayer()
         hookPausedResumePlayback()
         Log.s("startHook: StoryBackgroundAutoNext (module=${BuildConfig.VERSION_NAME} autoNext=${isAutoNextEnabled()} mediaButton=${ePrefs.getBoolean(MEDIA_BUTTON_KEY, false)})")
@@ -505,6 +517,7 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
      */
     private fun triggerForegroundScroll(forward: Boolean): Boolean = runCatching {
         val root = activeStoryPlayer ?: return@runCatching false
+        root.releaseRetainedMainNavigation()
         val current = root.invokeIntGetter("D1", "getIndex") ?: return@runCatching false
         val count = root.invokeIntGetter("N1") ?: 0
         val target = if (forward) current + 1 else current - 1
@@ -682,6 +695,204 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
     private fun rememberUpSpaceStoryPlayer(player: Any) {
         if (player.playerHostName() == HOST_SPACE && player.storyPagerTag() == "StorySpaceFragment") {
             upSpaceStoryPlayer = player
+        }
+    }
+
+    private fun clearRetainedMainTab(reason: String) {
+        retainedMainTab = null
+        Log.trace { "StoryAutoNext: clear retained main tab ($reason)" }
+    }
+
+    private fun Any.captureRetainedMainTab(): Boolean {
+        if (!isMainFeedStoryPlayer() || visibleSessionHost() != HOST_MAIN || activityPaused || isInBackground ||
+            readOfficialPagerStateQ() != 3
+        ) return false
+        val index = invokeIntGetter("D1", "getIndex") ?: return false
+        val rows = captureResumeFeedSnapshot() ?: return false
+        val id = rows.getOrNull(index)?.storyIdentity() ?: return false
+        val sameMedia = identitiesMatch(captureEnginePlayingIdentity(), id)
+        val position = if (sameMedia) liveStoryPlayerCoreFrom()
+            ?.invokeLongGetter("getCurrentPosition", "getRealCurrentPosition")
+            ?: innerStoryPlayer()?.invokeLongGetter("getCurrentPosition") ?: -1L else -1L
+        retainedMainTab = RetainedMainTab(ArrayList(rows), index, id, position,
+            sameMedia && invokeIntGetter("getState") == 5)
+        Log.trace { "StoryAutoNext: retain main tab rows=${rows.size} index=$index" }
+        return true
+    }
+
+    private fun Any.markRetainedMainTabAway() {
+        if (isMainFeedStoryPlayer()) retainedMainTab?.apply { away = true; returning = false }
+    }
+
+    private fun Any.hasProtectedMainTab(): Boolean {
+        if (!isMainFeedStoryPlayer() || mainTabRestoreOwner === this) return false
+        val saved = retainedMainTab ?: return false
+        // Keep slow initialization responses out until refresh, a new Story, or app-background handoff.
+        return saved.away || (saved.returning && saved.returnPlayer === this)
+    }
+
+    private fun hasRetainedMainPrefix(incoming: List<*>): Boolean {
+        val saved = retainedMainTab ?: return false
+        return incoming.size >= saved.rows.size && saved.rows.indices.all {
+            identitiesMatch(incoming[it]?.storyIdentity(), saved.rows[it].storyIdentity())
+        }
+    }
+
+    private fun Any.shouldBlockRetainedMainReplace(incoming: List<*>): Boolean =
+        hasProtectedMainTab() && !hasRetainedMainPrefix(incoming)
+
+    private fun Any.retainedMainReplacementIndex(incoming: List<*>, requestedIndex: Int): Int =
+        if (hasProtectedMainTab() && hasRetainedMainPrefix(incoming)) retainedMainTab!!.index else requestedIndex
+
+    private fun Any.retainedMainReturnIndex(): Int {
+        val saved = retainedMainTab ?: return -1
+        return if ((hasProtectedMainTab() || mainTabRestoreOwner === this) &&
+            saved.returning && !saved.navigationReleased) saved.index else -1
+    }
+
+    private fun Any.beginRetainedMainReturn(): Boolean {
+        if (!isMainFeedStoryPlayer() || visibleSessionHost() != HOST_MAIN || activityPaused || isInBackground) {
+            return false
+        }
+        val saved = retainedMainTab ?: return false
+        if (!saved.away) return saved.returning && saved.returnPlayer === this
+        saved.away = false
+        saved.returning = true
+        saved.returnPlayer = this
+        saved.navigationReleased = false
+        clearPausedResumeIntent("main-tab-return")
+        if (saved.paused) {
+            pausedResumeIdentity = saved.identity
+            pausedResumeHost = HOST_MAIN
+            pausedResumeStoryPlayer = innerStoryPlayer()
+            pausedResumePositionMs = saved.positionMs
+        }
+        restoreRetainedMainTabIfNeeded()
+        return true
+    }
+
+    private fun Any.applyRetainedMainPositionIfNeeded(): Boolean {
+        val saved = retainedMainTab ?: return false
+        if (retainedMainReturnIndex() < 0 || saved.positionMs <= 0 ||
+            !identitiesMatch(storyIdentityAt(invokeIntGetter("D1", "getIndex") ?: -1), saved.identity)
+        ) return false
+        if (identitiesMatch(captureEnginePlayingIdentity(), saved.identity) && invokeIntGetter("getState") in setOf(4, 5)) {
+            return false
+        }
+        setNativeStartPosition(saved.positionMs, saved.identity)
+        return true
+    }
+
+    /** Restore the old main chain, never the UP tab's current card or a replacement recommendation batch. */
+    private fun Any.restoreRetainedMainTabIfNeeded(): Boolean = runCatching {
+        val saved = retainedMainTab ?: return@runCatching false
+        if (!hasProtectedMainTab() || !saved.returning || mainTabRestoreOwner != null) return@runCatching false
+        val rows = captureResumeFeedSnapshot().orEmpty()
+        val replace = !hasRetainedMainPrefix(rows)
+        val index = invokeIntGetter("D1", "getIndex") ?: -1
+        if (!replace && (index == saved.index || saved.navigationReleased)) return@runCatching false
+        mainTabRestoreOwner = this
+        try {
+            withStoryPagerActiveFlag {
+                if (!saved.navigationReleased && saved.positionMs > 0) setNativeStartPosition(saved.positionMs, saved.identity)
+                if (replace) {
+                    val restore = javaClass.methods.firstOrNull {
+                        it.name == "W2" && it.parameterCount == 3 && it.parameterTypes[0] == List::class.java
+                    } ?: return@withStoryPagerActiveFlag
+                    restore.invoke(this, ArrayList(saved.rows), null, saved.index)
+                } else {
+                    callOfficialPagerAdvance(saved.index, smooth = false)
+                    syncOfficialPagerIndex(saved.index)
+                }
+            }
+        } finally {
+            mainTabRestoreOwner = null
+        }
+        val restored = hasRetainedMainPrefix(captureResumeFeedSnapshot().orEmpty()) &&
+            invokeIntGetter("D1", "getIndex") == saved.index
+        Log.trace { "StoryAutoNext: restore retained main rows=${saved.rows.size} index=${saved.index} replace=$replace ok=$restored" }
+        restored
+    }.getOrElse { Log.e(it); false }
+
+    private fun Any.releaseRetainedMainNavigation() {
+        if (isMainFeedStoryPlayer() && retainedMainTab?.returning == true) {
+            retainedMainTab?.apply { navigationReleased = true; positionMs = -1; paused = false }
+        }
+    }
+
+    private fun Any.noteRetainedMainSelection(index: Int) {
+        val saved = retainedMainTab ?: return
+        if (!hasProtectedMainTab() || !saved.returning || !saved.navigationReleased) return
+        val rows = captureResumeFeedSnapshot() ?: return
+        if (!hasRetainedMainPrefix(rows)) return
+        val id = rows.getOrNull(index)?.storyIdentity() ?: return
+        saved.rows = ArrayList(rows)
+        saved.index = index
+        saved.identity = id
+    }
+
+    private fun Any.prepareRetainedMainSelection(index: Int) {
+        val saved = retainedMainTab ?: return
+        if (!hasProtectedMainTab() || !saved.returning) return
+        if (index != saved.index && (index == saved.index + 1 || invokeIntGetter("getState") == 6)) {
+            releaseRetainedMainNavigation()
+        }
+        noteRetainedMainSelection(index)
+    }
+
+    private fun Any.shouldBlockRetainedMainPageChange(index: Int): Boolean {
+        val retained = retainedMainReturnIndex()
+        return retained >= 0 && index != retained && mainTabRestoreOwner !== this
+    }
+
+    private fun hookMainTabRetention() {
+        val mainClass = runCatching { mClassLoader.loadClass(HOST_MAIN) }.getOrNull() ?: return
+        fun player(host: Any): Any? = mainClass.declaredFields.firstOrNull {
+            it.type.name == "com.bilibili.video.story.player.StoryPagerPlayer"
+        }?.apply { isAccessible = true }?.get(host)
+        val switchClass = runCatching { mClassLoader.loadClass("com.bilibili.video.story.b") }.getOrNull() ?: return
+        mainClass.hookMethod("n8", String::class.java, switchClass) { chain ->
+            player(chain.thisObject)?.captureRetainedMainTab()
+            chain.proceed()
+        }
+        mainClass.hookMethod("p8", String::class.java) { chain ->
+            player(chain.thisObject)?.markRetainedMainTabAway()
+            chain.proceed()
+        }
+        mainClass.hookMethod("ik") { chain ->
+            if (retainedMainTab?.away == false) clearRetainedMainTab("outer-drag-cancelled")
+            chain.proceed()
+        }
+        mainClass.hookMethod("Yk", Bundle::class.java, String::class.java) { chain ->
+            val root = player(chain.thisObject)
+            val returning = root?.beginRetainedMainReturn() == true
+            val result = chain.proceed()
+            if (returning) {
+                root?.restoreRetainedMainTabIfNeeded()
+                root?.ensureOfficialPlayableFeed("main-tab-return")
+                root?.scheduleForegroundMetadataHeal("main-tab-return")
+            }
+            result
+        }
+        // Read the actual listener after view creation; InnerClasses metadata and setters may be optimized away.
+        val refreshListenerType = runCatching {
+            mClassLoader.loadClass("com.bilibili.video.story.view.StoryRefreshLayout\$b")
+        }.getOrNull() ?: return
+        mainClass.hookMethod("onViewCreated", android.view.View::class.java, Bundle::class.java) { chain ->
+            val result = chain.proceed()
+            val listener = mainClass.declaredFields.firstOrNull { refreshListenerType.isAssignableFrom(it.type) }
+                ?.apply { isAccessible = true }?.get(chain.thisObject)
+            val method = listener?.javaClass?.methods?.firstOrNull {
+                it.name == "onRefresh" && it.parameterCount == 0
+            }
+            if (method != null && hookedMainRefreshClasses.add(listener.javaClass)) {
+                method.hookMethod { refresh ->
+                    clearRetainedMainTab("user-main-refresh")
+                    refresh.proceed()
+                }
+                Log.trace { "StoryAutoNext: hooked main refresh callback" }
+            }
+            result
         }
     }
 
@@ -976,6 +1187,7 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
 
     /** Drop stale companion state only when StoryVideoActivity is finishing — not lock-screen recreate. */
     private fun resetStorySessionOnActivityBoundary(reason: String) {
+        clearRetainedMainTab(reason)
         foregroundMetadataHealGeneration++
         clearPausedResumeIntent("activity-boundary")
         isInBackground = false
@@ -1112,6 +1324,10 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
             if (finishing) {
                 resetStorySessionOnActivityBoundary("onDestroy finishing")
             }
+            chain.proceed()
+        }
+        activityClass.hookMethod("onCreate", Bundle::class.java) { chain ->
+            if (chain.args[0] == null) clearRetainedMainTab("new-story-activity")
             chain.proceed()
         }
         activityClass.hookMethod("onPause") { chain ->
@@ -2245,6 +2461,7 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
     /** When i3 J-branch zeroed f208480t, re-seed from live engine before x2 seek-on-prepare. */
     private fun Any.seedNativeStartFromEngineIfNeeded() {
         if (applyOfficialResumePosition()) return
+        if (applyRetainedMainPositionIfNeeded()) return
         if (applyPausedResumePositionIfNeeded()) return
         if (outerTabHandoffPending) {
             clearNativeStartPositionField()
@@ -2370,6 +2587,7 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
      */
     private fun Any.guardNativeStartPositionForPagerItem() {
         if (applyOfficialResumePosition()) return
+        if (applyRetainedMainPositionIfNeeded()) return
         // The old core may already be gone while the restored card still owns a user pause.
         if (applyPausedResumePositionIfNeeded()) return
         val d1 = invokeIntGetter("D1", "getIndex") ?: -1
@@ -2419,6 +2637,7 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
      */
     private fun Any.shouldBlockOfficialX2ForBgResume(): Boolean {
         if (officialX2RebindInProgress) return false
+        if (retainedMainReturnIndex() >= 0) return false
         // Background auto-next needs official x2 to bind/play the newly selected holder.
         // Only suppress stale x2 during the foreground resume handoff window.
         if (isInBackground || activityPaused) return false
@@ -2948,6 +3167,7 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
         resolvePausedResumeTargetIndex().takeIf { it >= 0 }?.let {
             return if (it == pagerIndex) -1 else it
         }
+        retainedMainReturnIndex().takeIf { it >= 0 }?.let { return if (it == pagerIndex) -1 else it }
         val playingId = captureEnginePlayingIdentity() ?: playingStoryKey ?: activeStoryKey
         val pagerId = if (pagerIndex >= 0) storyIdentityAt(pagerIndex) else null
         if (playingId != null && pagerId != null && identitiesMatch(playingId, pagerId)) {
@@ -3075,6 +3295,10 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
         }?.hookMethod { chain ->
             val incoming = chain.args[0] as? List<*> ?: return@hookMethod chain.proceed()
             val player = chain.thisObject
+            if (player.shouldBlockRetainedMainReplace(incoming)) {
+                Log.trace { "StoryAutoNext: keep retained main chain over W2 rows=${incoming.size}" }
+                return@hookMethod null
+            }
             if (player.shouldBlockDeferredW2Replace(incoming)) {
                 return@hookMethod null
             }
@@ -3082,7 +3306,8 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
                 return@hookMethod null
             }
             val requestedIndex = chain.args.getOrNull(2) as? Int ?: -1
-            val guardedIndex = player.resolveGuardedW2TargetIndex(incoming, requestedIndex)
+            val guardedIndex = player.retainedMainReplacementIndex(incoming,
+                player.resolveGuardedW2TargetIndex(incoming, requestedIndex))
             val result = if (guardedIndex != requestedIndex) {
                 Log.trace {
                     "StoryAutoNext: guard W2 reset target $requestedIndex -> $guardedIndex " +
@@ -3341,10 +3566,11 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
             result
         }
         callback.hookMethod("onPageSelected", Int::class.javaPrimitiveType!!) { chain ->
+            val owner = callback.declaredFields.firstOrNull { it.type == playerClass }
+                ?.also { it.isAccessible = true }?.get(chain.thisObject)
+            owner?.prepareRetainedMainSelection(chain.args[0] as Int)
             val result = chain.proceed()
             if (!activityPaused && !isInBackground) {
-                val owner = callback.declaredFields.firstOrNull { it.type == playerClass }
-                    ?.also { it.isAccessible = true }?.get(chain.thisObject)
                 owner?.scheduleForegroundMetadataHeal("page-selected")
             }
             result
@@ -3354,6 +3580,7 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
 
     /** User navigation supersedes an unfinished automatic resume, including its saved index. */
     private fun Any.releaseForegroundResumeForUserDrag(): Boolean {
+        releaseRetainedMainNavigation()
         foregroundPlaybackRecoveryGeneration++
         foregroundMetadataHealGeneration++
         if (activityPaused || isInBackground || !shouldManageBackgroundLoopMode()) return false
@@ -3390,6 +3617,9 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
             u2PauseMethod.hookMethod { chain ->
                 val player = chain.thisObject
                 if (player.shouldManageBackgroundLoopMode() && activityPaused) {
+                    if (player.isMainFeedStoryPlayer() && retainedMainTab?.returning == true) {
+                        clearRetainedMainTab("main-app-background")
+                    }
                     cancelPendingSurfaceRebind("u2-bg")
                     clearOuterTabHandoff()
                     cancelForegroundResumeHandoff()
@@ -3563,6 +3793,7 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
             // Official x2: w1(D1)→h2. Hook only defers i3→x2 during w2 F2 catch-up — no mutate f208480t.
             x2Method.hookMethod { chain ->
                 val player = chain.thisObject
+                player.restoreRetainedMainTabIfNeeded()
                 player.restoreGuardedResumeFeedBeforeX2()
                 if (!player.alignBeforePostResumeX2IfNeeded("official")) {
                     return@hookMethod null
@@ -3578,7 +3809,8 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
                 }
                 if (!player.shouldBlockOfficialX2ForBgResume()) {
                     if (!isInBackground && !activityPaused && !player.isForegroundSeekHandoffActive()) {
-                        if (!player.applyOfficialResumePosition() && !player.applyPausedResumePositionIfNeeded()) {
+                        if (!player.applyOfficialResumePosition() && !player.applyRetainedMainPositionIfNeeded() &&
+                            !player.applyPausedResumePositionIfNeeded()) {
                             player.clearNativeStartPositionField()
                         }
                     }
@@ -3605,6 +3837,11 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
             f2Method.hookMethod { chain ->
                 val player = chain.thisObject
                 val index = chain.args[0] as Int
+                player.prepareRetainedMainSelection(index)
+                if (player.shouldBlockRetainedMainPageChange(index)) {
+                    Log.trace { "StoryAutoNext: block retained main page reset index=$index" }
+                    return@hookMethod null
+                }
                 if (player.shouldBlockPostResumePagerReset(index)) {
                     Log.trace {
                         "StoryAutoNext: block post-resume F2 reset idx=$index " +
@@ -3772,6 +4009,7 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
 
     private fun Any.resolveStalePagerCatchUpIndex(pagerIndex: Int): Int {
         if (pagerIndex < 0) return -1
+        retainedMainReturnIndex().takeIf { it >= 0 }?.let { return if (it == pagerIndex) -1 else it }
         resolvePausedResumeTargetIndex().takeIf { it >= 0 }?.let {
             return if (it == pagerIndex) -1 else it
         }
@@ -4912,10 +5150,20 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
             val incoming = chain.args[0] as? List<*> ?: return@hookMethod chain.proceed()
             val requestedIndex = chain.args[1] as? Int ?: -1
             val adapter = chain.thisObject
+            val owner = adapter.storyAdapterOwnerPlayer()
+            if (owner?.shouldBlockRetainedMainReplace(incoming) == true) {
+                Log.trace { "StoryAutoNext: keep retained main chain over adapter replace rows=${incoming.size}" }
+                return@hookMethod null
+            }
             if (adapter.shouldBlockAdapterFullReplace(incoming, requestedIndex)) {
                 return@hookMethod null
             }
-            chain.proceed()
+            val index = owner?.retainedMainReplacementIndex(incoming, requestedIndex) ?: requestedIndex
+            if (index == requestedIndex) chain.proceed() else {
+                val args = chain.args.toTypedArray()
+                args[1] = index
+                chain.proceed(args)
+            }
         }
         Log.s("StoryAutoNext: hooked ${replaceMethod.declaringClass.name}.F1 replace guard")
     }

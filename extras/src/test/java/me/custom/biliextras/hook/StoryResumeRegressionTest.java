@@ -26,6 +26,7 @@ public final class StoryResumeRegressionTest {
     @Before public void reset() throws Exception {
         hook = new StoryBackgroundAutoNextHook(getClass().getClassLoader());
         call("clearSpaceSnapshots");
+        call("clearRetainedMainTab", "test-reset");
         call("clearPausedResumeIntent", "test-reset");
         state.setAppBackgroundResumeHandoffEligible(false);
         state.setResumeHandoffHost(null);
@@ -66,6 +67,152 @@ public final class StoryResumeRegressionTest {
         player.adapter.current = player.F.d;
         player.story.state = stateCode;
         return player;
+    }
+
+    private com.bilibili.video.story.player.StoryPagerPlayer mainTabPlayer() {
+        com.bilibili.video.story.player.StoryPagerPlayer player = new com.bilibili.video.story.player.StoryPagerPlayer();
+        player.tag = "StoryVideoFragment";
+        state.getPlayerHostByInstance().put(System.identityHashCode(player), "com.bilibili.video.story.StoryVideoFragment");
+        state.setVisibleOuterTabIndex(0);
+        state.setMainFeedStoryPlayer(player);
+        state.setActiveStoryPlayer(player);
+        for (int i = 0; i < 5; i++) player.adapter.items.add(new StoryDetail("BVmain" + i, i + 1));
+        player.index = 3;
+        player.story.playing = player.V1(3);
+        player.story.position = 7600;
+        player.story.state = 5;
+        return player;
+    }
+
+    @Test public void upRecreationCannotOverwriteTheMainTabsIndependentOriginalChain() throws Exception {
+        com.bilibili.video.story.player.StoryPagerPlayer original = mainTabPlayer();
+        java.util.List<StoryDetail> rows = new java.util.ArrayList<>(original.adapter.items);
+        assertEquals(true, call("captureRetainedMainTab", original));
+        call("markRetainedMainTabAway", original);
+        java.util.List<Object> upRows = Arrays.asList(new StoryDetail("BVup0", 101), new StoryDetail("BVup1", 102));
+        state.setResumeFeedSnapshot(upRows);
+        state.setResumeHandoffHost("com.bilibili.video.story.space.StorySpaceFragment");
+        state.setResumeHandoffIndex(1);
+        state.setResumeHandoffId("BVup1/102");
+        com.bilibili.video.story.player.StoryPagerPlayer recreated = mainTabPlayer();
+        recreated.adapter.items.clear();
+        recreated.adapter.items.add(new StoryDetail("BVnewRecommendation", 900));
+        recreated.index = 0;
+        recreated.story.playing = (StoryDetail) upRows.get(1);
+        assertEquals(true, call("beginRetainedMainReturn", recreated));
+        assertEquals(rows, recreated.adapter.items);
+        assertSame(rows.get(3), recreated.V1(3));
+        assertEquals(3, recreated.D1());
+        assertTrue(recreated.filterBypassObserved);
+        assertSame(upRows, state.getResumeFeedSnapshot());
+        assertEquals("com.bilibili.video.story.space.StorySpaceFragment", state.getResumeHandoffHost());
+        assertEquals("BVmain3/4", state.getPausedResumeIdentity());
+        assertEquals(7600L, state.getPausedResumePositionMs());
+        assertFalse(state.isRestoringFeedFor(recreated));
+    }
+
+    @Test public void hiddenMainRejectsReorderedOrNewBatchesButAllowsAppendOfTheSameChain() throws Exception {
+        com.bilibili.video.story.player.StoryPagerPlayer main = mainTabPlayer();
+        call("captureRetainedMainTab", main);
+        call("markRetainedMainTabAway", main);
+        java.util.List<StoryDetail> rows = new java.util.ArrayList<>(main.adapter.items);
+        assertEquals(false, call("shouldBlockRetainedMainReplace", main, rows));
+        java.util.Collections.swap(rows, 0, 1);
+        assertEquals(true, call("shouldBlockRetainedMainReplace", main, rows));
+        rows = new java.util.ArrayList<>(main.adapter.items);
+        rows.add(new StoryDetail("BVappend", 99));
+        assertEquals(false, call("shouldBlockRetainedMainReplace", main, rows));
+        assertEquals(3, call("retainedMainReplacementIndex", main, rows, 0));
+        assertEquals(true, call("shouldBlockRetainedMainReplace", main, Arrays.asList(new StoryDetail("BVnew", 100))));
+        com.bilibili.video.story.player.StoryPagerPlayer up = pausedPlayer(4);
+        assertEquals(false, call("shouldBlockRetainedMainReplace", up, Arrays.asList(new StoryDetail("BVup", 200))));
+    }
+
+    @Test public void healthyMainReturnDoesNotRebuildOrReplaceItsExistingList() throws Exception {
+        com.bilibili.video.story.player.StoryPagerPlayer main = mainTabPlayer();
+        call("captureRetainedMainTab", main);
+        call("markRetainedMainTabAway", main);
+        assertEquals(true, call("beginRetainedMainReturn", main));
+        assertEquals(0, main.replaceCalls);
+        assertEquals(3, main.D1());
+        assertEquals(false, call("restoreRetainedMainTabIfNeeded", main));
+        assertEquals(0, main.replaceCalls);
+    }
+
+    @Test public void lateMainResetRecoversTheOriginalIndexEvenWhenTheRowsAreStillPresent() throws Exception {
+        com.bilibili.video.story.player.StoryPagerPlayer main = mainTabPlayer();
+        call("captureRetainedMainTab", main);
+        call("markRetainedMainTabAway", main);
+        call("beginRetainedMainReturn", main);
+        main.index = 0;
+        assertEquals(true, call("restoreRetainedMainTabIfNeeded", main));
+        assertEquals(3, main.D1());
+        assertEquals(0, main.replaceCalls);
+        assertEquals(3, call("resolveStalePagerCatchUpIndex", main, 0));
+    }
+
+    @Test public void userSwipeRetainsRowProtectionAndUsesTheNewSelectionForRecovery() throws Exception {
+        com.bilibili.video.story.player.StoryPagerPlayer main = mainTabPlayer();
+        call("captureRetainedMainTab", main);
+        call("markRetainedMainTabAway", main);
+        call("beginRetainedMainReturn", main);
+        call("releaseForegroundResumeForUserDrag", main);
+        main.index = 2;
+        call("noteRetainedMainSelection", main, 2);
+        assertEquals(-1, call("retainedMainReturnIndex", main));
+        assertEquals(true, call("shouldBlockRetainedMainReplace", main, Arrays.asList(new StoryDetail("BVlate", 99))));
+        main.adapter.items.clear();
+        main.index = 0;
+        assertEquals(true, call("restoreRetainedMainTabIfNeeded", main));
+        assertEquals(2, main.D1());
+        assertEquals("BVmain2", main.V1(2).getBvid());
+    }
+
+    @Test public void programmaticNextDoesNotRewindToTheReturningMainAnchor() throws Exception {
+        com.bilibili.video.story.player.StoryPagerPlayer main = mainTabPlayer();
+        call("captureRetainedMainTab", main);
+        call("markRetainedMainTabAway", main);
+        call("beginRetainedMainReturn", main);
+        call("prepareRetainedMainSelection", main, 4);
+        main.index = 4;
+        assertEquals(-1, call("retainedMainReturnIndex", main));
+        assertEquals(false, call("restoreRetainedMainTabIfNeeded", main));
+        assertEquals(4, main.D1());
+    }
+
+    @Test public void latePageResetIsBlockedUntilRealNavigationReleasesTheMainAnchor() throws Exception {
+        com.bilibili.video.story.player.StoryPagerPlayer main = mainTabPlayer();
+        call("captureRetainedMainTab", main);
+        call("markRetainedMainTabAway", main);
+        call("beginRetainedMainReturn", main);
+        call("prepareRetainedMainSelection", main, 1);
+        assertEquals(true, call("shouldBlockRetainedMainPageChange", main, 1));
+        assertEquals(true, call("shouldBlockRetainedMainPageChange", main, 0));
+        assertEquals(false, call("shouldBlockRetainedMainPageChange", main, 3));
+        call("releaseForegroundResumeForUserDrag", main);
+        assertEquals(false, call("shouldBlockRetainedMainPageChange", main, 0));
+    }
+
+    @Test public void explicitRefreshOrNewStoryActivityCanDiscardTheOldMainChain() throws Exception {
+        com.bilibili.video.story.player.StoryPagerPlayer main = mainTabPlayer();
+        call("captureRetainedMainTab", main);
+        call("markRetainedMainTabAway", main);
+        call("clearRetainedMainTab", "user-main-refresh");
+        assertEquals(false, call("shouldBlockRetainedMainReplace", main, Arrays.asList(new StoryDetail("BVfresh", 99))));
+        assertEquals(false, call("beginRetainedMainReturn", main));
+    }
+
+    @Test public void upNavigationAndBackgroundSnapshotsCannotReleaseTheSavedMainTab() throws Exception {
+        com.bilibili.video.story.player.StoryPagerPlayer main = mainTabPlayer();
+        call("captureRetainedMainTab", main);
+        call("markRetainedMainTabAway", main);
+        com.bilibili.video.story.player.StoryPagerPlayer up = pausedPlayer(4);
+        state.setVisibleOuterTabIndex(1);
+        assertEquals(false, call("captureRetainedMainTab", up));
+        call("releaseForegroundResumeForUserDrag", up);
+        state.setVisibleOuterTabIndex(0);
+        assertEquals(true, call("beginRetainedMainReturn", main));
+        assertEquals(3, call("retainedMainReturnIndex", main));
     }
 
     @Test public void capturesPauseBeforeLifecycleAndKeepsItForSameClip() throws Exception {
