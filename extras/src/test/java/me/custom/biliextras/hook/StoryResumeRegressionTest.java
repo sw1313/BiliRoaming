@@ -42,11 +42,13 @@ public final class StoryResumeRegressionTest {
         state.setLiveEngineIndex(-1);
         state.setTrackedIndex(-1);
         state.setBackgroundEngineIndex(-1);
+        state.setBackgroundEngineMoved(false);
         state.setPlayingStoryKey(null);
         state.setActiveStoryKey(null);
         state.setPostResumeFeedGuardUntilMs(0L);
         state.setForegroundPlaybackRecoveryGeneration(0);
         state.setOuterTabRenderRecoveryGeneration(0);
+        state.setForegroundMetadataHealGeneration(0);
         state.setActiveStoryPlayer(null);
         state.setMainFeedStoryPlayer(null);
         state.setUpSpaceStoryPlayer(null);
@@ -383,6 +385,185 @@ public final class StoryResumeRegressionTest {
         player.adapter.current = new StoryDetail("BVdifferent", 999);
         assertEquals(false, call("applyPausedResumePositionIfNeeded", player));
         assertEquals(0, player.t);
+    }
+
+    @Test public void forwardSwipeMetadataCannotFollowThePreviousEngineItem() throws Exception {
+        com.bilibili.video.story.player.StoryPagerPlayer player = pausedPlayer(4);
+        player.adapter.items.addAll(Arrays.asList(new StoryDetail("BVold", 1), new StoryDetail("BVnew", 2)));
+        player.index = 1;
+        player.story.playing = player.V1(0);
+        call("refreshForegroundStoryMetadataIfNeeded", player, "test-forward-swipe");
+        assertEquals(1, player.metadata.index);
+    }
+
+    @Test public void backwardSwipeMetadataCannotFollowTheOldLaterEngineItem() throws Exception {
+        com.bilibili.video.story.player.StoryPagerPlayer player = pausedPlayer(4);
+        player.adapter.items.addAll(Arrays.asList(new StoryDetail("BVprevious", 1), new StoryDetail("BVnext", 2)));
+        player.index = 0;
+        player.story.playing = player.V1(1);
+        call("refreshForegroundStoryMetadataIfNeeded", player, "test-backward-swipe");
+        assertEquals(0, player.metadata.index);
+    }
+
+    @Test public void scrollingOrHiddenPagerCannotPublishMetadata() throws Exception {
+        com.bilibili.video.story.player.StoryPagerPlayer player = pausedPlayer(4);
+        player.R = 2;
+        call("refreshForegroundStoryMetadataIfNeeded", player, "test-settling");
+        assertEquals(0, player.metadata.calls);
+        player.R = 0;
+        state.setVisibleOuterTabIndex(0);
+        call("refreshForegroundStoryMetadataIfNeeded", player, "test-hidden");
+        assertEquals(0, player.metadata.calls);
+        state.setVisibleOuterTabIndex(1);
+        state.setActivityPaused(true);
+        call("refreshForegroundStoryMetadataIfNeeded", player, "test-background");
+        assertEquals(0, player.metadata.calls);
+    }
+
+    @Test public void selectedHolderCanReplaceOldMetadataWithoutChangingPlaybackOrFeed() throws Exception {
+        com.bilibili.video.story.player.StoryPagerPlayer player = pausedPlayer(4);
+        player.adapter.items.addAll(Arrays.asList(new StoryDetail("BVold", 1), new StoryDetail("BVnew", 2)));
+        player.index = 1;
+        player.story.playing = player.V1(1);
+        player.story.position = 8000;
+        player.adapter.holder = new com.bilibili.video.story.StoryVideoAdapter.Holder();
+        player.adapter.holder.controller.data = player.V1(0);
+        call("refreshForegroundStoryMetadataIfNeeded", player, "test-reused-holder");
+        assertSame(player.V1(1), player.adapter.holder.controller.data);
+        assertEquals(1, player.adapter.holder.dataChanges);
+        assertEquals(1, player.metadata.index);
+        assertEquals(1, player.D1());
+        assertEquals(2, player.N1());
+        assertEquals(8000, player.story.position);
+        assertEquals(0, player.story.publishCalls);
+        call("refreshForegroundStoryMetadataIfNeeded", player, "test-already-bound");
+        assertEquals(1, player.adapter.holder.dataChanges);
+    }
+
+    @Test public void normalPageCallbackDoesNotRepeatOfficialReportsWhenHolderNeedsRepair() throws Exception {
+        com.bilibili.video.story.player.StoryPagerPlayer player = pausedPlayer(4);
+        player.s = 0;
+        player.metadata.a(0);
+        player.adapter.holder = new com.bilibili.video.story.StoryVideoAdapter.Holder();
+        player.adapter.holder.controller.data = new StoryDetail("BVold", 1);
+        call("refreshForegroundStoryMetadataIfNeeded", player, "pager-idle");
+        assertEquals(1, player.metadata.calls);
+        assertSame(player.V1(0), player.adapter.holder.controller.data);
+        assertEquals(1, player.adapter.holder.dataChanges);
+    }
+
+    @Test public void nativeSessionMetadataRefreshWaitsForTheSelectedMediaToBecomeReady() throws Exception {
+        com.bilibili.video.story.player.StoryPagerPlayer player = pausedPlayer(4);
+        state.setActiveStoryPlayer(player);
+        player.story.playing = new StoryDetail("BVold", 1);
+        player.story.handler.hasCurrentMedia = true;
+        assertEquals(false, call("refreshOfficialMediaSessionMetadata", player));
+        player.story.playing = player.V1(0);
+        player.story.state = 2;
+        assertEquals(false, call("refreshOfficialMediaSessionMetadata", player));
+        player.story.state = 5;
+        assertEquals(true, call("refreshOfficialMediaSessionMetadata", player));
+        assertEquals(1, player.story.sessionClient.service.refreshCalls);
+        assertEquals(5, player.story.state);
+        state.setActivityPaused(true);
+        assertEquals(false, call("refreshOfficialMediaSessionMetadata", player));
+        assertEquals(1, player.story.sessionClient.service.refreshCalls);
+    }
+
+    @Test public void confirmedBackwardPageReplacesStaleHighTrackingIndices() throws Exception {
+        com.bilibili.video.story.player.StoryPagerPlayer player = pausedPlayer(4);
+        player.adapter.items.addAll(Arrays.asList(new StoryDetail("BVprevious", 1), new StoryDetail("BVnext", 2)));
+        player.index = 0;
+        player.story.playing = player.V1(0);
+        state.setTrackedIndex(3);
+        state.setLiveEngineIndex(3);
+        call("refreshForegroundStoryMetadataIfNeeded", player, "pager-idle");
+        assertEquals(0, state.getTrackedIndex());
+        assertEquals(0, state.getLiveEngineIndex());
+        assertEquals("BVprevious/1", state.getPlayingStoryKey());
+    }
+
+    @Test public void retainedPauseCannotCatchUpToAnOlderHighIndexOrANewCoreDefault() throws Exception {
+        com.bilibili.video.story.player.StoryPagerPlayer player = pausedPlayer(5);
+        for (int i = 0; i < 4; i++) player.adapter.items.add(new StoryDetail("BVrow" + i, i + 1));
+        player.index = 1;
+        player.story.playing = player.V1(1);
+        player.story.position = 13931;
+        call("capturePausedResumeIntent", player);
+        state.setResumeHandoffId("BVrow1/2");
+        state.setResumeHandoffIndex(1);
+        state.setResumeFeedSnapshot(new java.util.ArrayList<Object>(player.adapter.items));
+        state.setTrackedIndex(3);
+        state.setLiveEngineIndex(3);
+        player.story.playing = player.V1(3);
+        assertEquals(1, call("resolvePausedResumeTargetIndex", player));
+        assertEquals(-1, call("resolveStalePagerCatchUpIndex", player, 1));
+        state.setAppBackgroundResumeHandoffEligible(true);
+        assertEquals(false, call("shouldBlockOfficialX2ForBgResume", player));
+        call("seedNativeStartFromEngineIfNeeded", player);
+        assertEquals(13931, player.t);
+        player.adapter.items.clear();
+        player.adapter.current = null;
+        assertEquals(1, call("resolvePausedResumeTargetIndex", player));
+        assertEquals(1, call("resolveStalePagerCatchUpIndex", player, 0));
+        state.setBackgroundEngineMoved(true);
+        assertEquals(-1, call("resolvePausedResumeTargetIndex", player));
+    }
+
+    @Test public void delayedMetadataCallbackCannotSurviveSwipeReplacementOrNewOwner() throws Exception {
+        com.bilibili.video.story.player.StoryPagerPlayer player = pausedPlayer(4);
+        state.setActiveStoryPlayer(player);
+        String id = "BVpaused/27";
+        assertEquals(true, call("isForegroundMetadataTargetCurrent", player, 0, id, 0));
+        player.adapter.current = new StoryDetail("BVreranked", 28);
+        assertEquals(false, call("isForegroundMetadataTargetCurrent", player, 0, id, 0));
+        player.adapter.current = new StoryDetail("BVpaused", 27);
+        player.index = 1;
+        assertEquals(false, call("isForegroundMetadataTargetCurrent", player, 0, id, 0));
+        player.index = 0;
+        state.setForegroundMetadataHealGeneration(1);
+        assertEquals(false, call("isForegroundMetadataTargetCurrent", player, 0, id, 0));
+        assertEquals(true, call("isForegroundMetadataTargetCurrent", player, 0, id, 1));
+        state.setUpSpaceStoryPlayer(new com.bilibili.video.story.player.StoryPagerPlayer());
+        assertEquals(false, call("isForegroundMetadataTargetCurrent", player, 0, id, 1));
+    }
+
+    @Test public void settledPlaybackMismatchRebindsOnlyTheSelectedOriginalCard() throws Exception {
+        com.bilibili.video.story.player.StoryPagerPlayer player = pausedPlayer(4);
+        state.setActiveStoryPlayer(player);
+        player.adapter.items.addAll(Arrays.asList(new StoryDetail("BVold", 1), new StoryDetail("BVnew", 2)));
+        player.index = 1;
+        player.adapter.holder = new com.bilibili.video.story.StoryVideoAdapter.Holder();
+        player.adapter.holder.controller.data = player.V1(1);
+        player.story.playing = player.V1(0);
+        player.story.handler.hasCurrentMedia = true;
+        assertEquals(true, call("repairSettledForegroundPlaybackIfNeeded", player));
+        assertSame(player.V1(1), player.story.playing);
+        assertEquals(1, player.D1());
+        assertEquals(2, player.N1());
+        assertEquals(1, player.playCalls);
+        assertEquals(false, call("repairSettledForegroundPlaybackIfNeeded", player));
+        assertEquals(1, player.playCalls);
+    }
+
+    @Test public void settlingResolvingOrBackgroundHandoffCannotForceAPlaybackRebind() throws Exception {
+        com.bilibili.video.story.player.StoryPagerPlayer player = pausedPlayer(4);
+        state.setActiveStoryPlayer(player);
+        player.adapter.holder = new com.bilibili.video.story.StoryVideoAdapter.Holder();
+        player.story.playing = new StoryDetail("BVold", 1);
+        player.story.handler.hasCurrentMedia = true;
+        player.R = 2;
+        assertEquals(false, call("repairSettledForegroundPlaybackIfNeeded", player));
+        player.R = 0;
+        player.story.handler.hasCurrentMedia = false;
+        assertEquals(false, call("repairSettledForegroundPlaybackIfNeeded", player));
+        player.story.handler.hasCurrentMedia = true;
+        state.setAppBackgroundResumeHandoffEligible(true);
+        assertEquals(false, call("repairSettledForegroundPlaybackIfNeeded", player));
+        state.setAppBackgroundResumeHandoffEligible(false);
+        state.setActivityPaused(true);
+        assertEquals(false, call("repairSettledForegroundPlaybackIfNeeded", player));
+        assertEquals(0, player.playCalls);
     }
 
     @Test public void nativeSeekGuardRetainsPausePositionWhenTheOldCoreIsGone() throws Exception {

@@ -6,6 +6,11 @@ public final class StoryPlayer {
     public Object renderRoot;
     public Object G1() { return renderRoot; }
     public final StoryVideoPlayHandler handler = new StoryVideoPlayHandler();
+    public final SessionClient sessionClient = new SessionClient();
+    public static final class SessionClient {
+        public final su1.g service = new su1.g();
+        public su1.g getService() { return service; }
+    }
     public int publishCalls;
     public com.bilibili.video.story.StoryDetail j(String tag, int index) {
         java.util.List<com.bilibili.video.story.StoryDetail> rows = handler.provider.feeds.get(tag);

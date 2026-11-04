@@ -117,6 +117,7 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
         var pausedResumePositionMs = -1L
         var foregroundPlaybackRecoveryGeneration = 0
         var outerTabRenderRecoveryGeneration = 0
+        var foregroundMetadataHealGeneration = 0
 
         /**
          * Set in u2 when Activity truly pauses (app background). Cleared after w2 handoff finishes
@@ -878,6 +879,7 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
      * UP-space refresh and can land on a different video.
      */
     private fun reconcileForegroundOnOuterTabSwitch() {
+        foregroundMetadataHealGeneration++
         if (activityPaused) return
         clearOuterTabHandoff()
         if (isInBackground || polling) {
@@ -974,6 +976,7 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
 
     /** Drop stale companion state only when StoryVideoActivity is finishing — not lock-screen recreate. */
     private fun resetStorySessionOnActivityBoundary(reason: String) {
+        foregroundMetadataHealGeneration++
         clearPausedResumeIntent("activity-boundary")
         isInBackground = false
         activityPaused = false
@@ -1717,62 +1720,123 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
         return true
     }
 
-    /**
-     * After swipe / rerank, F1 can preload ahead while the engine still plays the previous item —
-     * bind title/author/cover to the video actually playing (log 22:50:14 drama vs F1 next).
-     */
-    private fun Any.refreshForegroundStoryMetadataIfNeeded(source: String) {
-        if (isInBackground || activityPaused) return
-        if (playerHostName() != visibleSessionHost()) return
-        if (!shouldManageBackgroundLoopMode()) return
-        if (System.identityHashCode(this) == pagerSyncInProgressPlayerId) return
-        if (readOfficialPagerStateQ() != 3) return
+    /** Metadata belongs to the selected card; an old or preloaded engine item cannot select it. */
+    private fun Any.refreshForegroundStoryMetadataIfNeeded(source: String): Boolean {
+        if (isInBackground || activityPaused) return false
+        if (playerHostName() != visibleSessionHost()) return false
+        if (!shouldManageBackgroundLoopMode()) return false
+        if (System.identityHashCode(this) == pagerSyncInProgressPlayerId) return false
+        if (readOfficialPagerStateQ() != 3 || readOfficialPagerScrollState() != 0) return false
         val d1 = invokeIntGetter("D1", "getIndex") ?: -1
-        if (d1 !in 0 until officialFeedCountReady()) return
-        val f1Id = currentStoryIdentity()
+        if (d1 !in 0 until officialFeedCountReady()) return false
+        val pagerId = storyIdentityAt(d1) ?: return false
         if (appBackgroundResumeHandoffEligible && backgroundEngineMoved &&
-            f1Id != null && resumeHandoffId != null &&
-            identitiesMatch(f1Id, resumeHandoffId)
+            resumeHandoffId != null && identitiesMatch(pagerId, resumeHandoffId)
         ) {
-            return
+            return false
         }
-        val pagerId = storyIdentityAt(d1)
-        val engineId = captureEnginePlayingIdentity() ?: playingStoryKey ?: activeStoryKey
-        val engineIdx = engineId?.let { indexOfStoryIdentity(it) }?.takeIf { it >= 0 }
-        val targetIdx = when {
-            engineIdx != null &&
-                (f1Id == null || !identitiesMatch(f1Id, engineId)) -> engineIdx
-            else -> d1
+        val officialPageEvent = source == "page-selected" || source == "pager-idle"
+        val lastSelected = runCatching {
+            javaClass.getDeclaredField("s").apply { isAccessible = true }.getInt(this)
+        }.getOrDefault(-1)
+        // onPageSelected normally delivered f.a already; avoid repeating its reports and callbacks.
+        if (!officialPageEvent || lastSelected != d1) notifyOfficialPageMetadata(d1)
+        val ready = refreshCurrentHolderMetadataIfNeeded()
+        val engineId = captureEnginePlayingIdentity()
+        if (engineId != null && !identitiesMatch(engineId, pagerId)) {
+            Log.trace { "StoryAutoNext: keep selected metadata index=$d1 while engine changes source=$source" }
+            return false
         }
-        val targetId = storyIdentityAt(targetIdx)
-            ?: if (targetIdx == d1) f1Id ?: pagerId else null
-            ?: engineId
-        if (targetId == null || targetId.startsWith("unknown/")) {
-            val fallbackId = sequenceOf(resumeHandoffId, engineId, playingStoryKey, activeStoryKey)
-                .filterNotNull()
-                .firstOrNull()
-            (fallbackId ?: preferredResumeIdentity(d1))?.let { safeId ->
-                val safeIdx = indexOfStoryIdentity(safeId).takeIf { it >= 0 } ?: d1
-                notifyOfficialPageMetadata(safeIdx)
-                Log.trace {
-                    "StoryAutoNext: metadata heal safe idx=$safeIdx id=$safeId source=$source"
-                }
-            }
-            return
+        if (engineId != null && !appBackgroundResumeHandoffEligible && !pendingPostW2SurfaceRebind &&
+            !backgroundEngineMoved
+        ) {
+            trackedIndex = d1
+            liveEngineIndex = d1
+            trackedIndexHost = playerHostName()
+            playingStoryKey = pagerId
+            activeStoryKey = pagerId
+            backgroundEngineIndex = -1
         }
-        notifyOfficialPageMetadata(targetIdx)
-        if (targetIdx != d1 || (f1Id != null && !identitiesMatch(f1Id, targetId))) {
-            Log.trace {
-                "StoryAutoNext: metadata heal idx=$targetIdx id=$targetId " +
-                    "f1=$f1Id d1=$d1 engine=$engineId source=$source"
-            }
-        }
-        if (targetIdx == d1 && (f1Id == null || !identitiesMatch(f1Id, targetId))) {
-            clearOfficialAdapterPlayingMarkerIfNeeded()
-        }
+        if (ready) refreshOfficialMediaSessionMetadata()
+        return ready
     }
 
-    private fun Any.scheduleForegroundMetadataHeal(source: String, attempt: Int = 0) {
+    /** Publish through the bound official session only after the native item matches this card. */
+    private fun Any.refreshOfficialMediaSessionMetadata(): Boolean = runCatching {
+        if (activityPaused || isInBackground || currentVisibleStoryPlayer() !== this ||
+            playerHostName() != visibleSessionHost() || readOfficialPagerStateQ() != 3 ||
+            readOfficialPagerScrollState() != 0
+        ) return@runCatching false
+        val index = invokeIntGetter("D1", "getIndex") ?: return@runCatching false
+        val selectedId = storyIdentityAt(index) ?: return@runCatching false
+        if (!identitiesMatch(selectedId, captureEnginePlayingIdentity())) return@runCatching false
+        val story = innerStoryPlayer() ?: return@runCatching false
+        if (story.invokeIntGetter("getState") !in setOf(4, 5)) return@runCatching false
+        val handler = story.javaClass.declaredFields.firstOrNull {
+            it.type.name == "com.bilibili.video.story.player.StoryVideoPlayHandler"
+        }?.apply { isAccessible = true }?.get(story) ?: return@runCatching false
+        if (handler.javaClass.cachedStoryMethod("G")?.invoke(handler) != true) return@runCatching false
+        val sessionService = story.javaClass.declaredFields.asSequence().mapNotNull { field ->
+            runCatching {
+                field.isAccessible = true
+                val client = field.get(story) ?: return@runCatching null
+                client.javaClass.cachedStoryMethod("getService")?.invoke(client)
+            }.getOrNull()
+        }.firstOrNull { it.javaClass.name == "su1.g" } ?: return@runCatching false
+        val refresh = sessionService.javaClass.cachedStoryMethod("G") ?: return@runCatching false
+        refresh.invoke(sessionService)
+        true
+    }.getOrElse {
+        Log.e(it)
+        false
+    }
+
+    private fun Any.readOfficialPagerScrollState(): Int = runCatching {
+        javaClass.getDeclaredField("R").apply { isAccessible = true }.getInt(this)
+    }.getOrDefault(0)
+
+    /** Rebind only a reused holder whose model still belongs to another card. No feed reload. */
+    private fun Any.refreshCurrentHolderMetadataIfNeeded(): Boolean = runCatching {
+        val index = invokeIntGetter("D1", "getIndex") ?: return@runCatching false
+        val item = storyItemAt(index) ?: return@runCatching false
+        val adapter = getStoryVideoAdapter() ?: return@runCatching false
+        val holder = adapter.javaClass.getMethod("Y0", Int::class.javaPrimitiveType).invoke(adapter, index)
+            ?: return@runCatching false
+        val controller = holder.javaClass.cachedStoryMethod("x1")?.invoke(holder) ?: return@runCatching false
+        if (controller.javaClass.cachedStoryMethod("isAttachedToWindow")?.invoke(controller) != true) {
+            return@runCatching false
+        }
+        val readData = controller.javaClass.cachedStoryMethod("getMData") ?: return@runCatching false
+        if (!identitiesMatch(readData.invoke(controller)?.storyIdentity(), item.storyIdentity())) {
+            val rebind = holder.javaClass.methods.firstOrNull {
+                it.name == "N1" && it.parameterCount == 1 && it.parameterTypes[0].isInstance(item)
+            }?.apply { isAccessible = true } ?: return@runCatching false
+            // Official N1 updates the controller and sends onDataChanged to its widgets.
+            rebind.invoke(holder, item)
+            Log.trace { "StoryAutoNext: rebound selected holder metadata index=$index" }
+        }
+        identitiesMatch(readData.invoke(controller)?.storyIdentity(), item.storyIdentity())
+    }.getOrElse {
+        Log.e(it)
+        false
+    }
+
+    private fun Any.isForegroundMetadataTargetCurrent(index: Int, id: String?, generation: Int): Boolean =
+        generation == foregroundMetadataHealGeneration && !activityPaused && !isInBackground &&
+            currentVisibleStoryPlayer() === this && playerHostName() == visibleSessionHost() &&
+            invokeIntGetter("D1", "getIndex") == index &&
+            (id == null || identitiesMatch(storyIdentityAt(index), id))
+
+    private fun Any.scheduleForegroundMetadataHeal(source: String) {
+        if (activityPaused || isInBackground || playerHostName() != visibleSessionHost()) return
+        val generation = ++foregroundMetadataHealGeneration
+        val index = invokeIntGetter("D1", "getIndex") ?: return
+        scheduleForegroundMetadataHealAttempt(source, index, storyIdentityAt(index), generation, 0)
+    }
+
+    private fun Any.scheduleForegroundMetadataHealAttempt(
+        source: String, index: Int, id: String?, generation: Int, attempt: Int,
+    ) {
         if (attempt > 3) return
         val delayMs = when (attempt) {
             0 -> 0L
@@ -1780,26 +1844,46 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
             2 -> 96L
             else -> 200L
         }
-        val playerId = System.identityHashCode(this)
         mainHandler.postDelayed({
-            val player = activeStoryPlayer?.takeIf { System.identityHashCode(it) == playerId }
-                ?: mainFeedStoryPlayer?.takeIf { System.identityHashCode(it) == playerId }
-                ?: return@postDelayed
+            if (!isForegroundMetadataTargetCurrent(index, id, generation)) return@postDelayed
             runCatching {
-                player.refreshForegroundStoryMetadataIfNeeded(source)
-                val d1 = player.invokeIntGetter("D1", "getIndex") ?: -1
-                val f1Id = player.currentStoryIdentity()
-                val engineId = player.captureEnginePlayingIdentity()
-                val needsRetry = d1 >= 0 && (
-                    f1Id == null ||
-                        (engineId != null &&
-                            !this@StoryBackgroundAutoNextHook.identitiesMatch(f1Id, engineId))
-                    )
-                if (needsRetry) {
-                    player.scheduleForegroundMetadataHeal(source, attempt + 1)
+                if (!refreshForegroundStoryMetadataIfNeeded(source)) {
+                    if (attempt == 3) {
+                        repairSettledForegroundPlaybackIfNeeded()
+                    } else {
+                        scheduleForegroundMetadataHealAttempt(source, index, id, generation, attempt + 1)
+                    }
                 }
             }.onFailure { Log.e(it) }
         }, delayMs)
+    }
+
+    /** After bounded metadata retries, repair only a ready core still playing another settled card. */
+    private fun Any.repairSettledForegroundPlaybackIfNeeded(): Boolean = runCatching {
+        if (activityPaused || isInBackground || currentVisibleStoryPlayer() !== this ||
+            playerHostName() != visibleSessionHost() || readOfficialPagerStateQ() != 3 ||
+            readOfficialPagerScrollState() != 0 || isForegroundSeekHandoffActive() || backgroundEngineMoved
+        ) return@runCatching false
+        val index = invokeIntGetter("D1", "getIndex") ?: return@runCatching false
+        val selectedId = storyIdentityAt(index) ?: return@runCatching false
+        val engineId = captureEnginePlayingIdentity() ?: return@runCatching false
+        if (identitiesMatch(selectedId, engineId)) return@runCatching false
+        val story = innerStoryPlayer() ?: return@runCatching false
+        if (story.invokeIntGetter("getState") !in setOf(4, 5)) return@runCatching false
+        val handler = story.javaClass.declaredFields.firstOrNull {
+            it.type.name == "com.bilibili.video.story.player.StoryVideoPlayHandler"
+        }?.apply { isAccessible = true }?.get(story) ?: return@runCatching false
+        // A pending resource resolve can legitimately show the old frame for a moment.
+        if (handler.javaClass.cachedStoryMethod("G")?.invoke(handler) != true ||
+            !refreshCurrentHolderMetadataIfNeeded() || !ensureOfficialPlayableFeed("settled-page")
+        ) return@runCatching false
+        clearOfficialAdapterPlayingMarkerIfNeeded()
+        invokeOfficialPlayAtD1(smooth = false)
+        Log.trace { "StoryAutoNext: rebound mismatched settled playback index=$index" }
+        true
+    }.getOrElse {
+        Log.e(it)
+        false
     }
 
     /**
@@ -2161,6 +2245,7 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
     /** When i3 J-branch zeroed f208480t, re-seed from live engine before x2 seek-on-prepare. */
     private fun Any.seedNativeStartFromEngineIfNeeded() {
         if (applyOfficialResumePosition()) return
+        if (applyPausedResumePositionIfNeeded()) return
         if (outerTabHandoffPending) {
             clearNativeStartPositionField()
             return
@@ -2339,6 +2424,7 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
         if (isInBackground || activityPaused) return false
         if (!appBackgroundResumeHandoffEligible) return false
         if (playerHostName() != visibleSessionHost()) return false
+        if (!backgroundEngineMoved && shouldRetainPausedResume()) return false
         val d1 = invokeIntGetter("D1", "getIndex") ?: -1
         if (d1 < 0) return false
         val engineId = captureEnginePlayingIdentity() ?: playingStoryKey ?: activeStoryKey
@@ -2717,7 +2803,8 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
         val pagerId = if (d1 >= 0) currentStoryIdentity() ?: storyIdentityAt(d1) else null
         val engineId = captureEnginePlayingIdentity() ?: playingStoryKey ?: activeStoryKey
         val adapterBlock = officialAdapterPlayingMarkerBlocksX2AtD1()
-        val idMismatch = pagerId != null && engineId != null && !identitiesMatch(pagerId, engineId)
+        val idMismatch = pagerId != null && engineId != null && !identitiesMatch(pagerId, engineId) &&
+            (backgroundEngineMoved || !shouldRetainPausedResume())
         Log.trace {
             "StoryAutoNext: w2 schedule x2 surface rebind d1=$d1 moved=$backgroundEngineMoved " +
                 "adapterBlock=$adapterBlock idMismatch=$idMismatch id=$pagerId"
@@ -2857,6 +2944,9 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
         }
         if (host != null && trackedIndexHost != null && host != trackedIndexHost && !backgroundEngineMoved) {
             return -1
+        }
+        resolvePausedResumeTargetIndex().takeIf { it >= 0 }?.let {
+            return if (it == pagerIndex) -1 else it
         }
         val playingId = captureEnginePlayingIdentity() ?: playingStoryKey ?: activeStoryKey
         val pagerId = if (pagerIndex >= 0) storyIdentityAt(pagerIndex) else null
@@ -3160,13 +3250,17 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
             val story = observerClass.declaredFields.firstOrNull { it.type == storyClass }
                 ?.also { it.isAccessible = true }?.get(chain.thisObject)
                 ?: return@hookMethod chain.proceed()
-            if (pausedResumeOwner(story) == null) return@hookMethod chain.proceed()
+            val pausedOwner = pausedResumeOwner(story)
             val state = chain.args[0] as Int
-            if (state == 3) story.setPausedPrepareFlag(true)
+            if (pausedOwner != null && state == 3) story.setPausedPrepareFlag(true)
             val result = chain.proceed()
             // Delayed lifecycle resumes can arrive after w2's handoff ended. Only real input
             // releases the pause intent, rather than treating a PLAYING callback as user intent.
-            if (state == 3 || state == 4) story.pauseRetainedResumeIfReady()
+            if (pausedOwner != null && (state == 3 || state == 4)) story.pauseRetainedResumeIfReady()
+            if ((state == 4 || state == 5) && !activityPaused && !isInBackground) {
+                currentVisibleStoryPlayer()?.takeIf { it.innerStoryPlayer() === story }
+                    ?.scheduleForegroundMetadataHeal("native-item-ready")
+            }
             result
         }
         runCatching {
@@ -3235,12 +3329,25 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
             }
         } ?: return
         callback.hookMethod("onPageScrollStateChanged", Int::class.javaPrimitiveType!!) { chain ->
+            val owner = callback.declaredFields.firstOrNull { it.type == playerClass }
+                ?.also { it.isAccessible = true }?.get(chain.thisObject)
             if (chain.args[0] == 1) { // ViewPager2.SCROLL_STATE_DRAGGING: a real touch gesture.
-                val owner = callback.declaredFields.firstOrNull { it.type == playerClass }
-                    ?.also { it.isAccessible = true }?.get(chain.thisObject)
                 owner?.releaseForegroundResumeForUserDrag()
             }
-            chain.proceed()
+            val result = chain.proceed()
+            if (chain.args[0] == 0 && !activityPaused && !isInBackground) {
+                owner?.scheduleForegroundMetadataHeal("pager-idle")
+            }
+            result
+        }
+        callback.hookMethod("onPageSelected", Int::class.javaPrimitiveType!!) { chain ->
+            val result = chain.proceed()
+            if (!activityPaused && !isInBackground) {
+                val owner = callback.declaredFields.firstOrNull { it.type == playerClass }
+                    ?.also { it.isAccessible = true }?.get(chain.thisObject)
+                owner?.scheduleForegroundMetadataHeal("page-selected")
+            }
+            result
         }
         Log.s("StoryAutoNext: hooked ${callback.name} user drag resume release")
     }
@@ -3248,6 +3355,7 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
     /** User navigation supersedes an unfinished automatic resume, including its saved index. */
     private fun Any.releaseForegroundResumeForUserDrag(): Boolean {
         foregroundPlaybackRecoveryGeneration++
+        foregroundMetadataHealGeneration++
         if (activityPaused || isInBackground || !shouldManageBackgroundLoopMode()) return false
         clearPausedResumeIntent("foreground-user-drag")
         if (!appBackgroundResumeHandoffEligible && !pendingPostW2SurfaceRebind &&
@@ -3663,7 +3771,11 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
     }
 
     private fun Any.resolveStalePagerCatchUpIndex(pagerIndex: Int): Int {
-        if (pagerIndex < 0 || !isStalePagerVersusSession(pagerIndex)) return -1
+        if (pagerIndex < 0) return -1
+        resolvePausedResumeTargetIndex().takeIf { it >= 0 }?.let {
+            return if (it == pagerIndex) -1 else it
+        }
+        if (!isStalePagerVersusSession(pagerIndex)) return -1
         val host = playerHostName()
         if (host != null && trackedIndexHost != null && host != trackedIndexHost &&
             !backgroundEngineMoved &&
@@ -3680,6 +3792,19 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
             resumeHandoffIndex,
             captureEnginePlayingIndex(),
         ).coerceAtLeast(0)
+    }
+
+    /** A retained user pause cannot advance to an older tracked maximum or a recreated core's default. */
+    private fun Any.resolvePausedResumeTargetIndex(): Int {
+        if (backgroundEngineMoved || playerHostName() != pausedResumeHost) return -1
+        val id = pausedResumeIdentity ?: return -1
+        indexOfStoryIdentity(id).takeIf { it >= 0 }?.let { return it }
+        if (identitiesMatch(resumeHandoffId, id) && resumeHandoffIndex >= 0 &&
+            resumeFeedSnapshot?.getOrNull(resumeHandoffIndex)?.let {
+                identitiesMatch(it.storyIdentity(), id)
+            } == true
+        ) return resumeHandoffIndex
+        return -1
     }
 
     /** Map session index onto the current feed; prefer identity when the feed was truncated. */

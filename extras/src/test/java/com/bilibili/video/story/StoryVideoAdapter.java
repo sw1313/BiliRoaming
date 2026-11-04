@@ -8,12 +8,16 @@ public class StoryVideoAdapter {
     public void K1() { if (holder != null) { coverHidden = true; holder.controller.onRender(); } }
     public static final class Holder {
         public final RenderNode controller = new RenderNode(null);
+        public int dataChanges;
         public RenderNode x1() { return controller; }
+        public void N1(StoryDetail data) { controller.data = data; dataChanges++; }
     }
     public static final class RenderNode {
         public Object parent;
         public int renderCalls;
         public boolean attached = true;
+        public StoryDetail data;
+        public StoryDetail getMData() { return data; }
         public RenderNode(Object parent) { this.parent = parent; }
         public Object getParent() { return parent; }
         public boolean isAttachedToWindow() { return attached; }
