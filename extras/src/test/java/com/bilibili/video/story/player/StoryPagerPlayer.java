@@ -20,6 +20,13 @@ public final class StoryPagerPlayer {
     public final f metadata = new f();
     public int playCalls;
     public int replaceCalls;
+    public final i p0 = new i();
+    public final class i implements StoryPlayer.d {
+        @Override public void onStateChanged(int state) {
+            if (state == 3 && t > 0) { story.position = t; t = 0; }
+        }
+    }
+    public void x(StoryPlayer.d observer) { story.x(observer); }
     private void x2(boolean smooth) { playCalls++; story.playing = V1(index); adapter.h = story.playing; }
     public int D1() { return index; }
     public void F2(int target, boolean smooth) { if (target >= 0 && target < N1()) index = target; }

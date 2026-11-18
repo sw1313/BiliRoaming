@@ -821,6 +821,22 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
         }
     }
 
+    /** Releasing the resume index for a swipe must retain the original recommendation rows. */
+    private fun Any.retainMainRowsForForegroundNavigation() {
+        if (!isMainFeedStoryPlayer() || playerHostName() != visibleSessionHost() || activityPaused || isInBackground ||
+            resumeHandoffHost != HOST_MAIN || System.currentTimeMillis() > postResumeFeedGuardUntilMs
+        ) return
+        val rows = resumeFeedSnapshot?.takeIf { it.isNotEmpty() } ?: return
+        val current = invokeIntGetter("D1", "getIndex") ?: return
+        val index = if (identitiesMatch(rows.getOrNull(current)?.storyIdentity(), storyIdentityAt(current))) {
+            current
+        } else resumeHandoffIndex
+        val identity = rows.getOrNull(index)?.storyIdentity() ?: return
+        retainedMainTab = RetainedMainTab(ArrayList(rows), index, identity, -1L, false,
+            returning = true, returnPlayer = this, navigationReleased = true)
+        Log.trace { "StoryAutoNext: retain original main rows for resumed navigation rows=${rows.size} index=$index" }
+    }
+
     private fun Any.noteRetainedMainSelection(index: Int) {
         val saved = retainedMainTab ?: return
         if (!hasProtectedMainTab() || !saved.returning || !saved.navigationReleased) return
@@ -861,7 +877,9 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
             chain.proceed()
         }
         mainClass.hookMethod("ik") { chain ->
-            if (retainedMainTab?.away == false) clearRetainedMainTab("outer-drag-cancelled")
+            if (retainedMainTab?.let { !it.away && !it.returning } == true) {
+                clearRetainedMainTab("outer-drag-cancelled")
+            }
             chain.proceed()
         }
         mainClass.hookMethod("Yk", Bundle::class.java, String::class.java) { chain ->
@@ -2879,6 +2897,38 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
         false
     }
 
+    /** i3 can exit early after a handoff, leaving the official seek-on-prepare observer detached. */
+    private fun Any.restoreOfficialPlaybackStateObserver() {
+        if (activityPaused || isInBackground || currentVisibleStoryPlayer() !== this ||
+            playerHostName() != visibleSessionHost() || readOfficialPagerStateQ() != 3
+        ) return
+        runCatching {
+            val observer = javaClass.declaredFields.firstOrNull {
+                it.name == "p0" || it.type.name == "${javaClass.name}\$i"
+            }?.also { it.isAccessible = true }?.get(this) ?: return@runCatching
+            val register = javaClass.methods.firstOrNull {
+                it.name == "x" && it.parameterCount == 1 && it.parameterTypes[0].isInstance(observer)
+            } ?: return@runCatching
+            register.invoke(this, observer)
+        }.onFailure { Log.e(it) }
+    }
+
+    /** A pause arriving during the prepared seek can leave the recreated core at zero. */
+    private fun Any.restorePausedResumePositionIfNeeded(): Boolean = runCatching {
+        if (!shouldRetainPausedResume() || pausedResumePositionMs <= 0 ||
+            !identitiesMatch(captureEnginePlayingIdentity(), pausedResumeIdentity)
+        ) return@runCatching false
+        val story = innerStoryPlayer() ?: return@runCatching false
+        if (story.invokeIntGetter("getState") != 5) return@runCatching false
+        val position = story.invokeLongGetter("getCurrentPosition") ?: return@runCatching false
+        if (kotlin.math.abs(position - pausedResumePositionMs) <= 500L) return@runCatching false
+        val seek = story.javaClass.cachedStoryMethod("seekTo",
+            Int::class.javaPrimitiveType!!, Boolean::class.javaPrimitiveType!!) ?: return@runCatching false
+        seek.invoke(story, pausedResumePositionMs.toInt(), false)
+        Log.trace { "StoryAutoNext: restored paused core position $position->$pausedResumePositionMs" }
+        true
+    }.getOrElse { Log.e(it); false }
+
     /** A bound holder and matching queue do not prove that a recreated core has a media source. */
     private fun Any.reloadUnpreparedPlayableItem(index: Int, positionMs: Long): Boolean = runCatching {
         if (activityPaused || isInBackground || playerHostName() != visibleSessionHost()) return@runCatching false
@@ -2886,8 +2936,10 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
         val story = innerStoryPlayer() ?: return@runCatching false
         val before = story.invokeIntGetter("getState") ?: return@runCatching false
         Log.trace { "StoryAutoNext: resumed core check index=$index state=$before" }
+        if (before == 5) return@runCatching restorePausedResumePositionIfNeeded()
         if (before != 0 && before != 7) return@runCatching false
         if (!ensureOfficialPlayableFeed("unprepared-core")) return@runCatching false
+        restoreOfficialPlaybackStateObserver()
         val handler = story.javaClass.declaredFields.firstOrNull {
             it.type.name == "com.bilibili.video.story.player.StoryVideoPlayHandler"
         }?.apply { isAccessible = true }?.get(story) ?: return@runCatching false
@@ -2918,24 +2970,33 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
         false
     }
 
-    /** Two bounded checks, cancelled by navigation/backgrounding or a newer resume. */
-    private fun Any.scheduleForegroundPlaybackRecovery() {
+    private fun Any.createForegroundPlaybackRecoveryTask(generation: Int): Runnable? {
+        if (activityPaused || isInBackground || playerHostName() != visibleSessionHost() ||
+            currentVisibleStoryPlayer() !== this
+        ) return null
         val player = this
-        val index = invokeIntGetter("D1", "getIndex") ?: return
-        val identity = storyIdentityAt(index) ?: return
+        val index = invokeIntGetter("D1", "getIndex") ?: return null
+        val identity = storyIdentityAt(index) ?: return null
         val story = innerStoryPlayer()
-        val generation = ++foregroundPlaybackRecoveryGeneration
         val position = if (shouldRetainPausedResume()) pausedResumePositionMs else -1L
+        return Runnable {
+            if (generation != foregroundPlaybackRecoveryGeneration || activityPaused || isInBackground ||
+                player.playerHostName() != visibleSessionHost() || currentVisibleStoryPlayer() !== player ||
+                (story != null && player.innerStoryPlayer() !== story) ||
+                player.invokeIntGetter("D1", "getIndex") != index ||
+                !identitiesMatch(player.storyIdentityAt(index), identity)
+            ) return@Runnable
+            player.reloadUnpreparedPlayableItem(index, position)
+        }
+    }
+
+    /** Re-arm after a visible page bind or settled drag, including a drag that keeps the same page. */
+    private fun Any.scheduleForegroundPlaybackRecovery() {
+        val generation = foregroundPlaybackRecoveryGeneration + 1
+        val recovery = createForegroundPlaybackRecoveryTask(generation) ?: return
+        foregroundPlaybackRecoveryGeneration = generation
         listOf(2_000L, 5_000L).forEach { delay ->
-            mainHandler.postDelayed({
-                if (generation != foregroundPlaybackRecoveryGeneration || activityPaused || isInBackground ||
-                    currentVisibleStoryPlayer() !== player ||
-                    (story != null && player.innerStoryPlayer() !== story) ||
-                    player.invokeIntGetter("D1", "getIndex") != index ||
-                    !identitiesMatch(player.storyIdentityAt(index), identity)
-                ) return@postDelayed
-                player.reloadUnpreparedPlayableItem(index, position)
-            }, delay)
+            mainHandler.postDelayed(recovery, delay)
         }
     }
 
@@ -3574,6 +3635,7 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
             val result = chain.proceed()
             if (chain.args[0] == 0 && !activityPaused && !isInBackground) {
                 owner?.scheduleForegroundMetadataHeal("pager-idle")
+                owner?.scheduleForegroundPlaybackRecovery()
             }
             result
         }
@@ -3592,6 +3654,7 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
 
     /** User navigation supersedes an unfinished automatic resume, including its saved index. */
     private fun Any.releaseForegroundResumeForUserDrag(): Boolean {
+        retainMainRowsForForegroundNavigation()
         releaseRetainedMainNavigation()
         foregroundPlaybackRecoveryGeneration++
         foregroundMetadataHealGeneration++
@@ -3828,12 +3891,14 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
                     }
                 }
                 player.ensureOfficialPlayableFeed("official-x2")
+                player.restoreOfficialPlaybackStateObserver()
                 if (!activityPaused && !isInBackground && player.playerHostName() == visibleSessionHost() &&
                     !player.isRenderAttachedToCurrentHolder()
                 ) player.clearOfficialAdapterPlayingMarkerIfNeeded()
                 val result = chain.proceed()
                 player.restoreCurrentHolderRenderNotification()
                 player.hideStaleEmptyFeedPlaceholder()
+                player.scheduleForegroundPlaybackRecovery()
                 result
             }
             Log.s("StoryAutoNext: hooked ${playerClass.name}.x2 defer-only")

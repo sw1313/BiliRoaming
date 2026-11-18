@@ -25,10 +25,20 @@ public final class StoryPlayer {
     public int state = 4;
     public boolean p0;
     public int pauseCalls;
+    public int seekCalls;
+    public void seekTo(int value, boolean fromUser) { seekCalls++; position = value; }
     public long position;
     public int stateAfterDirector = -1;
+    public interface d { void onStateChanged(int state); }
+    public final java.util.List<d> stateObservers = new java.util.ArrayList<>();
+    public void x(d observer) { if (!stateObservers.contains(observer)) stateObservers.add(observer); }
     public long getCurrentPosition() { return position; }
-    public void M2(int index) { if (stateAfterDirector >= 0) state = stateAfterDirector; }
+    public void M2(int index) {
+        if (stateAfterDirector >= 0) {
+            state = stateAfterDirector;
+            for (d observer : new java.util.ArrayList<>(stateObservers)) observer.onStateChanged(state);
+        }
+    }
     public com.bilibili.video.story.StoryDetail playing;
     public com.bilibili.video.story.StoryDetail l() { return playing; }
     public int getState() { return state; }

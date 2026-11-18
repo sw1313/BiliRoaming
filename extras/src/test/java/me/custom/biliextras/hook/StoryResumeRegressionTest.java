@@ -209,6 +209,41 @@ public final class StoryResumeRegressionTest {
         assertEquals("BVmain2", main.V1(2).getBvid());
     }
 
+    @Test public void draggingAfterMainBackgroundRestoreKeepsTheOriginalNextAndPreviousRows() throws Exception {
+        com.bilibili.video.story.player.StoryPagerPlayer main = mainTabPlayer();
+        java.util.List<Object> original = new java.util.ArrayList<>(main.adapter.items);
+        state.setResumeFeedSnapshot(original);
+        state.setResumeHandoffHost("com.bilibili.video.story.StoryVideoFragment");
+        state.setResumeHandoffIndex(3);
+        state.setPostResumeFeedGuardUntilMs(System.currentTimeMillis() + 12000L);
+        call("releaseForegroundResumeForUserDrag", main);
+        assertEquals(-1, call("retainedMainReturnIndex", main));
+        assertEquals(true, call("shouldBlockRetainedMainReplace", main,
+            Arrays.asList(new StoryDetail("BVfresh", 99))));
+        main.index = 2;
+        call("noteRetainedMainSelection", main, 2);
+        main.adapter.items.clear();
+        main.index = 0;
+        assertEquals(true, call("restoreRetainedMainTabIfNeeded", main));
+        assertEquals(original, main.adapter.items);
+        assertEquals(2, main.index);
+    }
+
+    @Test public void rowProtectionAfterBackgroundAdvanceUsesTheVisibleIndexAndRequiresTheMainResume() throws Exception {
+        com.bilibili.video.story.player.StoryPagerPlayer main = mainTabPlayer();
+        state.setResumeFeedSnapshot(new java.util.ArrayList<Object>(main.adapter.items));
+        state.setResumeHandoffIndex(3);
+        state.setPostResumeFeedGuardUntilMs(System.currentTimeMillis() + 12000L);
+        state.setResumeHandoffHost("com.bilibili.video.story.space.StorySpaceFragment");
+        call("retainMainRowsForForegroundNavigation", main);
+        assertEquals(false, call("shouldBlockRetainedMainReplace", main, Arrays.asList(new StoryDetail("BVfresh", 99))));
+        state.setResumeHandoffHost("com.bilibili.video.story.StoryVideoFragment");
+        main.index = 4;
+        call("retainMainRowsForForegroundNavigation", main);
+        assertEquals(-1, call("retainedMainReturnIndex", main));
+        assertEquals(4, call("retainedMainReplacementIndex", main, main.adapter.items, 0));
+    }
+
     @Test public void programmaticNextDoesNotRewindToTheReturningMainAnchor() throws Exception {
         com.bilibili.video.story.player.StoryPagerPlayer main = mainTabPlayer();
         call("captureRetainedMainTab", main);
@@ -887,6 +922,126 @@ public final class StoryResumeRegressionTest {
         state.setVisibleOuterTabIndex(0);
         assertEquals(false, call("reloadUnpreparedPlayableItem", player, 0, 23000L));
         assertEquals(0, player.story.handler.provider.reloadCalls);
+    }
+
+    @Test public void settledDragCanRecoverTheSameIdlePageAfterCancellingTheResumeCheck() throws Exception {
+        com.bilibili.video.story.player.StoryPagerPlayer player = pausedPlayer(0);
+        state.setActiveStoryPlayer(player);
+        player.story.stateAfterDirector = 2;
+        StoryDetail original = player.adapter.current;
+        Runnable old = (Runnable) call("createForegroundPlaybackRecoveryTask", player, 0);
+        call("releaseForegroundResumeForUserDrag", player);
+        old.run();
+        assertEquals(0, player.story.state);
+        Runnable settled = (Runnable) call("createForegroundPlaybackRecoveryTask", player,
+            state.getForegroundPlaybackRecoveryGeneration());
+        settled.run();
+        assertEquals(2, player.story.state);
+        assertSame(original, player.adapter.current);
+        assertEquals(0, player.index);
+        assertEquals(0, player.replaceCalls);
+    }
+
+    @Test public void settledDragRecoversTheNewCardWithoutRestoringTheOldResumeIndex() throws Exception {
+        com.bilibili.video.story.player.StoryPagerPlayer player = pausedPlayer(0);
+        state.setActiveStoryPlayer(player);
+        player.adapter.current = null;
+        java.util.List<StoryDetail> rows = Arrays.asList(new StoryDetail("BVold", 1), new StoryDetail("BVnew", 2));
+        player.adapter.items.addAll(rows);
+        Runnable old = (Runnable) call("createForegroundPlaybackRecoveryTask", player, 0);
+        call("releaseForegroundResumeForUserDrag", player);
+        player.index = 1;
+        player.story.stateAfterDirector = 2;
+        old.run();
+        assertEquals(0, player.story.state);
+        Runnable settled = (Runnable) call("createForegroundPlaybackRecoveryTask", player,
+            state.getForegroundPlaybackRecoveryGeneration());
+        settled.run();
+        assertEquals(2, player.story.state);
+        assertEquals(1, player.index);
+        assertEquals(rows, player.adapter.items);
+        assertEquals(0, player.t);
+        assertEquals(0, player.replaceCalls);
+    }
+
+    @Test public void hiddenPageCannotCancelTheVisiblePagesPlaybackRecovery() throws Exception {
+        com.bilibili.video.story.player.StoryPagerPlayer player = pausedPlayer(0);
+        state.setActiveStoryPlayer(player);
+        state.setUpSpaceStoryPlayer(player);
+        com.bilibili.video.story.player.StoryPagerPlayer hidden = pausedPlayer(0);
+        call("scheduleForegroundPlaybackRecovery", hidden);
+        assertEquals(0, state.getForegroundPlaybackRecoveryGeneration());
+        assertNull(call("createForegroundPlaybackRecoveryTask", hidden, 0));
+        state.setInBackground(true);
+        assertNull(call("createForegroundPlaybackRecoveryTask", player, 0));
+    }
+
+    @Test public void recoveryFromAnOldNativePlayerCannotReloadItsReplacement() throws Exception {
+        com.bilibili.video.story.player.StoryPagerPlayer player = pausedPlayer(0);
+        state.setActiveStoryPlayer(player);
+        Runnable old = (Runnable) call("createForegroundPlaybackRecoveryTask", player, 0);
+        player.story = new com.bilibili.video.story.player.StoryPlayer();
+        player.story.state = 0;
+        player.story.stateAfterDirector = 2;
+        old.run();
+        assertEquals(0, player.story.state);
+        assertEquals(0, player.story.handler.provider.reloadCalls);
+        ((Runnable) call("createForegroundPlaybackRecoveryTask", player, 0)).run();
+        assertEquals(2, player.story.state);
+    }
+
+    @Test public void reopeningTheIdleCoreRestoresItsOfficialPreparedSeekObserver() throws Exception {
+        com.bilibili.video.story.player.StoryPagerPlayer player = pausedPlayer(0);
+        state.setActiveStoryPlayer(player);
+        player.story.stateAfterDirector = 3;
+        assertEquals(true, call("reloadUnpreparedPlayableItem", player, 0, 23000L));
+        assertEquals(23000L, player.story.position);
+        assertEquals(0, player.t);
+        assertEquals(1, player.story.stateObservers.size());
+        player.story.state = 0;
+        player.story.position = 0;
+        assertEquals(true, call("reloadUnpreparedPlayableItem", player, 0, 46000L));
+        assertEquals(46000L, player.story.position);
+        assertEquals(1, player.story.stateObservers.size());
+    }
+
+    @Test public void hiddenPagerCannotAttachItsPreparedSeekObserverToTheSharedPlayer() throws Exception {
+        com.bilibili.video.story.player.StoryPagerPlayer visible = pausedPlayer(0);
+        state.setActiveStoryPlayer(visible);
+        com.bilibili.video.story.player.StoryPagerPlayer hidden = pausedPlayer(0);
+        hidden.story = visible.story;
+        call("restoreOfficialPlaybackStateObserver", hidden);
+        assertTrue(visible.story.stateObservers.isEmpty());
+    }
+
+    @Test public void latePauseResetRestoresTheNativePositionWithoutResumingOrReplacingTheList() throws Exception {
+        com.bilibili.video.story.player.StoryPagerPlayer player = pausedPlayer(5);
+        state.setActiveStoryPlayer(player);
+        player.story.playing = player.adapter.current;
+        player.story.position = 23000L;
+        call("capturePausedResumeIntent", player);
+        player.story.position = 0;
+        assertEquals(true, call("reloadUnpreparedPlayableItem", player, 0, 23000L));
+        assertEquals(23000L, player.story.position);
+        assertEquals(5, player.story.state);
+        assertEquals(0, player.replaceCalls);
+        assertEquals(false, call("reloadUnpreparedPlayableItem", player, 0, 23000L));
+        assertEquals(1, player.story.seekCalls);
+    }
+
+    @Test public void cancelledPauseOrDifferentNativeVideoCannotReceiveTheOldPausedSeek() throws Exception {
+        com.bilibili.video.story.player.StoryPagerPlayer player = pausedPlayer(5);
+        state.setActiveStoryPlayer(player);
+        player.story.playing = player.adapter.current;
+        player.story.position = 23000L;
+        call("capturePausedResumeIntent", player);
+        player.story.position = 0;
+        player.story.playing = new StoryDetail("BVother", 300);
+        assertEquals(false, call("reloadUnpreparedPlayableItem", player, 0, 23000L));
+        player.story.playing = player.adapter.current;
+        call("clearPausedResumeIntent", "user-play");
+        assertEquals(false, call("reloadUnpreparedPlayableItem", player, 0, 23000L));
+        assertEquals(0, player.story.seekCalls);
     }
 
     @Test public void cardMarkerCannotHideARenderViewStillMountedInThePreviousActivityWindow() throws Exception {
