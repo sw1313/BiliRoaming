@@ -60,6 +60,62 @@ public final class StoryResumeRegressionTest {
         assertEquals(4, call("relatedSpaceType", new StorySpaceFragment(4, null)));
     }
 
+    @Test public void mainEntryResponseKeepsTheRequestedPartWhenTheServerSendsItLater() throws Exception {
+        StoryDetail otherPart = new StoryDetail("BVentry", 12, 100);
+        StoryDetail requested = new StoryDetail("BVentry", 13, 100);
+        StoryDetail next = new StoryDetail("BVnext", 20, 200);
+        java.util.List<StoryDetail> response = Arrays.asList(otherPart, next, requested);
+        assertEquals(Arrays.asList(requested, otherPart, next),
+            call("preserveMainEntryVideo", response, null, 100L, "BVentry", 13L));
+        assertEquals(Arrays.asList(otherPart, next, requested), response);
+    }
+
+    @Test public void mainEntryResponseRetainsTheLocalCardOnlyWhenItMatchesTheRequestedVideo() throws Exception {
+        StoryDetail entry = new StoryDetail("BVentry", 13, 100);
+        StoryDetail next = new StoryDetail("BVnext", 20, 200);
+        java.util.List<StoryDetail> response = Arrays.asList(next);
+        assertEquals(Arrays.asList(entry, next), call("preserveMainEntryVideo", response, entry, 0L, "BVentry", 13L));
+        assertNull(call("preserveMainEntryVideo", response, entry, 100L, "BVentry", 12L));
+        assertNull(call("preserveMainEntryVideo", response, null, 100L, "BVentry", 13L));
+        assertNull(call("preserveMainEntryVideo", response, entry, 0L, null, 0L));
+    }
+
+    @Test public void restoredMainRejectsLateInitialResponseBeforeItCanPauseThePlayer() throws Exception {
+        com.bilibili.video.story.player.StoryPagerPlayer main = mainTabPlayer();
+        java.util.List<StoryDetail> original = new java.util.ArrayList<>(main.adapter.items);
+        state.setResumeFeedSnapshot(new java.util.ArrayList<Object>(original));
+        state.setResumeHandoffHost("com.bilibili.video.story.StoryVideoFragment");
+        state.setResumeHandoffId("BVmain3/4");
+        state.setResumeHandoffCount(original.size());
+        state.setPostResumeFeedGuardUntilMs(System.currentTimeMillis() + 12000L);
+        assertEquals(true, call("shouldBlockInitialMainFeedResponse", main, Arrays.asList(new StoryDetail("BVlate", 99))));
+        assertEquals(false, call("shouldBlockInitialMainFeedResponse", main, original));
+    }
+
+    @Test public void resourceRetryDoesNotUseAStaleProviderPointer() throws Exception {
+        com.bilibili.video.story.player.StoryPagerPlayer player = pausedPlayer(7);
+        player.story.handler.provider.index = 1;
+        assertEquals(false, call("reloadUnpreparedPlayableItem", player, 0, -1L));
+        assertEquals(0, player.story.handler.provider.reloadCalls);
+        player.story.handler.provider.index = 0;
+        assertEquals(true, call("reloadUnpreparedPlayableItem", player, 0, -1L));
+        assertEquals(1, player.story.handler.provider.reloadCalls);
+    }
+
+    @Test public void delayedRecoveryDoesNotReuseThePausePositionAfterUserPlay() throws Exception {
+        com.bilibili.video.story.player.StoryPagerPlayer player = pausedPlayer(5);
+        state.setActiveStoryPlayer(player);
+        player.story.position = 23000L;
+        call("capturePausedResumeIntent", player);
+        Runnable check = (Runnable) call("createForegroundPlaybackRecoveryTask", player, 0);
+        call("clearPausedResumeIntent", "user-play");
+        player.story.state = 0;
+        check.run();
+        assertEquals(1, player.story.handler.provider.reloadCalls);
+        assertNull(player.story.handler.provider.reloadPosition);
+        assertEquals(0, player.t);
+    }
+
     @Test public void sameAnchorCannotSharePageCountBetweenUpAndRelatedModes() throws Exception {
         StoryDetail anchor = new StoryDetail("BVsharedAnchor", 7);
         StorySpaceFragment reused = new StorySpaceFragment(1, anchor);

@@ -867,6 +867,40 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
         fun player(host: Any): Any? = mainClass.declaredFields.firstOrNull {
             it.type.name == "com.bilibili.video.story.player.StoryPagerPlayer"
         }?.apply { isAccessible = true }?.get(host)
+        mainClass.declaredMethods.firstOrNull {
+            it.name == "Bq" && Modifier.isStatic(it.modifiers) && it.parameterCount == 6 &&
+                it.parameterTypes[1] == mainClass && it.parameterTypes[5] == List::class.java
+        }?.hookMethod { chain ->
+            val incoming = chain.args[5] as? List<*> ?: return@hookMethod chain.proceed()
+            if (chain.args[0] != true || incoming.isEmpty()) return@hookMethod chain.proceed()
+            val fragment = chain.args[1] ?: return@hookMethod chain.proceed()
+            val pager = player(fragment) ?: return@hookMethod chain.proceed()
+            // Bq reports a missing video and pauses before issuing W2. Reject the stale batch here.
+            if (pager.shouldBlockInitialMainFeedResponse(incoming)) {
+                pager.restoreRetainedMainTabIfNeeded()
+                pager.restoreGuardedResumeFeedBeforeX2()
+                pager.hideStaleEmptyFeedPlaceholder()
+                pager.scheduleForegroundPlaybackRecovery()
+                Log.trace { "StoryAutoNext: ignored initial main response that would replace the restored feed" }
+                return@hookMethod null
+            }
+            val firstRequest = fragment.javaClass.declaredFields.firstOrNull {
+                it.name == "r" && it.type == Boolean::class.javaPrimitiveType
+            }?.apply { isAccessible = true }?.getBoolean(fragment) == true
+            if (!firstRequest || activityPaused || isInBackground || visibleSessionHost() != HOST_MAIN) {
+                return@hookMethod chain.proceed()
+            }
+            fun stringField(name: String): String? = fragment.javaClass.declaredFields.firstOrNull {
+                it.name == name && it.type == String::class.java
+            }?.apply { isAccessible = true }?.get(fragment) as? String
+            val ordered = preserveMainEntryVideo(incoming, pager.storyItemAt(0),
+                stringField("o")?.toLongOrNull() ?: 0L, stringField("q"), stringField("p")?.toLongOrNull() ?: 0L)
+                ?: return@hookMethod chain.proceed()
+            Log.trace { "StoryAutoNext: kept requested first story card in entry response" }
+            val args = chain.args.toTypedArray()
+            args[5] = ordered
+            chain.proceed(args)
+        }
         val switchClass = runCatching { mClassLoader.loadClass("com.bilibili.video.story.b") }.getOrNull() ?: return
         mainClass.hookMethod("n8", String::class.java, switchClass) { chain ->
             player(chain.thisObject)?.captureRetainedMainTab()
@@ -912,6 +946,37 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
                 Log.trace { "StoryAutoNext: hooked main refresh callback" }
             }
             result
+        }
+    }
+
+    private fun Any.shouldBlockInitialMainFeedResponse(incoming: List<*>): Boolean =
+        shouldBlockRetainedMainReplace(incoming) || shouldBlockDeferredW2Replace(incoming) ||
+            shouldBlockPostResumeW2Replace(incoming) ||
+            (isMainFeedStoryPlayer() && isResumeHandoffArmed() && resumeHandoffHost == HOST_MAIN &&
+                wouldReplaceSavedResumeChain(incoming))
+
+    /** Keep the route's exact part as the first row so Bq can use its normal same-video update. */
+    private fun preserveMainEntryVideo(
+        incoming: List<*>, seed: Any?, aid: Long, bvid: String?, cid: Long,
+    ): List<Any?>? {
+        if (incoming.isEmpty() || (aid <= 0 && bvid.isNullOrBlank())) return null
+        fun matches(item: Any?): Boolean {
+            item ?: return false
+            val itemCid = item.invokeLongGetter("getCid") ?: 0L
+            if (cid > 0 && itemCid != cid) return false
+            return if (aid > 0) item.invokeLongGetter("getAid") == aid
+            else item.javaClass.cachedStoryMethod("getBvid")?.invoke(item) == bvid
+        }
+        val matchIndex = incoming.indexOfFirst(::matches)
+        if (matchIndex == 0) return null
+        val entry = if (matchIndex > 0) incoming[matchIndex] else seed?.takeIf {
+            matches(it) && (it.invokeLongGetter("getAid") ?: 0L) > 0 &&
+                (it.invokeLongGetter("getCid") ?: 0L) > 0 &&
+                it.javaClass.cachedStoryMethod("isPlayableVideo")?.invoke(it) == true
+        } ?: return null
+        return ArrayList<Any?>(incoming.size + 1).apply {
+            add(entry)
+            incoming.forEachIndexed { index, item -> if (index != matchIndex) add(item) }
         }
     }
 
@@ -2865,7 +2930,7 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
         val convert = javaClass.declaredMethods.firstOrNull {
             it.name == "l3" && it.parameterTypes.contentEquals(arrayOf(List::class.java))
         }?.apply { isAccessible = true } ?: return@runCatching false
-        val params = convert.invoke(this, rows) as? List<*> ?: return@runCatching false
+        val params = convert.invoke(this, ArrayList(rows)) as? List<*> ?: return@runCatching false
         if (params.size != rows.size) return@runCatching false
         val read = story.javaClass.methods.firstOrNull {
             it.name == "j" && it.parameterTypes.contentEquals(arrayOf(String::class.java, Int::class.javaPrimitiveType))
@@ -2944,6 +3009,8 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
             it.type.name == "com.bilibili.video.story.player.StoryVideoPlayHandler"
         }?.apply { isAccessible = true }?.get(story) ?: return@runCatching false
         val provider = handler.javaClass.cachedStoryMethod("y")?.invoke(handler) ?: return@runCatching false
+        val tag = storyPagerTag() ?: return@runCatching false
+        if (provider.javaClass.cachedStoryMethod("u")?.invoke(provider) != tag) return@runCatching false
         // Re-enter the official director before forcing a fresh resolve for its current item.
         if (positionMs > 0) setNativeStartPosition(positionMs, storyIdentityAt(index))
         story.javaClass.methods.firstOrNull {
@@ -2954,6 +3021,10 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
             Log.trace { "StoryAutoNext: restored current core via director index=$index state=$afterDirector" }
             return@runCatching true
         }
+        // T reloads the provider's current pointer, not the pager's index passed to M2.
+        if (provider.invokeIntGetter("w") != index ||
+            provider.javaClass.cachedStoryMethod("u")?.invoke(provider) != tag
+        ) return@runCatching false
         val reload = provider.javaClass.methods.firstOrNull {
             it.name == "T" && it.parameterCount == 3 &&
                 it.parameterTypes[0] == Int::class.javaObjectType &&
@@ -2978,14 +3049,15 @@ class StoryBackgroundAutoNextHook(classLoader: ClassLoader) : BaseHook(classLoad
         val index = invokeIntGetter("D1", "getIndex") ?: return null
         val identity = storyIdentityAt(index) ?: return null
         val story = innerStoryPlayer()
-        val position = if (shouldRetainPausedResume()) pausedResumePositionMs else -1L
         return Runnable {
             if (generation != foregroundPlaybackRecoveryGeneration || activityPaused || isInBackground ||
                 player.playerHostName() != visibleSessionHost() || currentVisibleStoryPlayer() !== player ||
+                player.readOfficialPagerScrollState() != 0 ||
                 (story != null && player.innerStoryPlayer() !== story) ||
                 player.invokeIntGetter("D1", "getIndex") != index ||
                 !identitiesMatch(player.storyIdentityAt(index), identity)
             ) return@Runnable
+            val position = if (player.shouldRetainPausedResume()) pausedResumePositionMs else -1L
             player.reloadUnpreparedPlayableItem(index, position)
         }
     }

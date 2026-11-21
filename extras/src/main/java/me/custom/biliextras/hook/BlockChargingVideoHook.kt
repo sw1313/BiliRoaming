@@ -103,7 +103,7 @@ class BlockChargingVideoHook(classLoader: ClassLoader) : BaseHook(classLoader) {
             return
         }
         val listMethods = storyClass.declaredMethods.filter { method ->
-            method.parameterTypes.isNotEmpty() && method.parameterTypes[0] == List::class.java
+            method.name != "l3" && method.parameterTypes.isNotEmpty() && method.parameterTypes[0] == List::class.java
         }
         if (listMethods.isEmpty()) {
             Log.w { "BlockChargingVideo: no List-param method on StoryPagerPlayer" }
@@ -111,6 +111,7 @@ class BlockChargingVideoHook(classLoader: ClassLoader) : BaseHook(classLoader) {
         }
         Log.d { "BlockChargingVideo story methods: ${listMethods.joinToString { it.name }}" }
         storyClass.hookAllMethods(listMethods) { chain ->
+            if (StoryBackgroundAutoNextHook.isRestoringFeedFor(chain.thisObject)) return@hookAllMethods chain.proceed()
             @Suppress("UNCHECKED_CAST")
             val primary = chain.args.getOrNull(0) as? MutableList<Any?>
             if (primary != null) {
